@@ -3,7 +3,8 @@
 import fs from "node:fs";
 import process from "node:process";
 
-if (process.argv.includes("--version")) {
+const args = process.argv.slice(2);
+if (args.includes("--version")) {
   process.stdout.write("2.1.210 (Claude Code)\n");
   process.exit(0);
 }
@@ -11,16 +12,25 @@ if (process.argv.includes("--version")) {
 let input = "";
 for await (const chunk of process.stdin) input += chunk.toString();
 
-const args = process.argv.slice(2);
 const valueAfter = (option) => {
   const index = args.indexOf(option);
   return index >= 0 ? args[index + 1] : null;
 };
-const sessionId = valueAfter("--resume") || valueAfter("--session-id") || "missing-session";
+const resumed = args.includes("--resume");
+const conversationId = valueAfter("--resume") || valueAfter("--session-id") || "missing-session";
 const model = valueAfter("--model") || "claude-default";
+const schemaJson = valueAfter("--json-schema");
 const logPath = process.env.FAKE_CLAUDE_LOG;
 if (logPath) {
-  fs.appendFileSync(logPath, `${JSON.stringify({ args, input, cwd: process.cwd(), sessionId, model })}\n`, "utf8");
+  fs.appendFileSync(logPath, `${JSON.stringify({
+    args,
+    input,
+    cwd: process.cwd(),
+    conversationId,
+    model,
+    resumed,
+    schemaKeys: schemaJson ? Object.keys(JSON.parse(schemaJson).properties ?? {}) : null
+  })}\n`, "utf8");
 }
 
 const delay = Number(process.env.FAKE_CLAUDE_DELAY_MS || 0);
@@ -53,7 +63,7 @@ process.stdout.write(`${JSON.stringify({
   type: "result",
   subtype: "success",
   is_error: false,
-  session_id: sessionId,
+  session_id: conversationId,
   result: JSON.stringify(structured),
   structured_output: structured,
   modelUsage: { [model]: { inputTokens: 1, outputTokens: 1 } }

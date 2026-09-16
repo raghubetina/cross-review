@@ -18,7 +18,7 @@ const valueAfter = (option) => {
   return index >= 0 ? args[index + 1] : null;
 };
 const resumed = args[0] === "exec" && args[1] === "resume";
-const threadId = resumed ? args[2] : crypto.randomUUID();
+const conversationId = resumed ? args[2] : crypto.randomUUID();
 const model = valueAfter("-m") || "codex-default";
 const outputPath = valueAfter("-o");
 const schemaPath = valueAfter("--output-schema");
@@ -29,7 +29,7 @@ if (logPath) {
     args,
     input,
     cwd: process.cwd(),
-    threadId,
+    conversationId,
     model,
     resumed,
     promptFromStdin: args.includes("-"),
@@ -38,7 +38,7 @@ if (logPath) {
 }
 
 // Real Codex reports the thread before doing any work, so the runtime can record it early.
-process.stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: threadId })}\n`);
+process.stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: conversationId })}\n`);
 process.stdout.write(`${JSON.stringify({ type: "turn.started" })}\n`);
 
 const delay = Number(process.env.FAKE_CODEX_DELAY_MS || 0);

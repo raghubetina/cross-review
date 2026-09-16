@@ -51,7 +51,9 @@ Once a reviewer process starts, any error, timeout, cancellation, worker death, 
 npm test
 ```
 
-Runs both suites against disposable Git repositories with fake `claude` and `codex` executables.
+Runs one suite, parametrized over both backends, against disposable Git repositories with fake `claude` and `codex` executables.
+
+The shared runtime lives in `src/runtime.mjs` with one backend module per reviewer in `src/backends/`. Each plugin's `scripts/` directory holds a five-line entry plus committed copies of the runtime and its backend, because both hosts copy an installed plugin out of the repository. After editing `src/`, run `npm run build` to refresh the copies; the test suite fails while a copy is stale.
 
 Verify an installed development build without starting a review:
 

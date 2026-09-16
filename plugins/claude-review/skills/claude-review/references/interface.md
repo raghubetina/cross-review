@@ -14,8 +14,9 @@ claude-review.mjs new [scope]                 new session, then review
 claude-review.mjs reset                       forget active session; retain artifacts
 ```
 
-Every review result prints its session ID. To resume that exact active session with a new scope after the branch
-identity changes, including when an exact-commit review worktree advances to a descendant, pass:
+Every review result prints its plugin session ID and its Claude session ID; `claude --resume <claude-session-id>`
+opens the reviewer's conversation interactively. To resume that exact active session with a new scope after the
+branch identity changes, including when an exact-commit review worktree advances to a descendant, pass:
 
 ```text
 claude-review.mjs --resume-session <session-id> range <prior-head>..<current-head> [-- focus]
@@ -56,20 +57,24 @@ The runtime also accepts trailing focus text without `--` when unambiguous.
 --model <model>              explicitly select and persist a model for this session
 --effort <level>             low, medium, high, xhigh, or max; default max
 --include-working            add local changes to branch, commit, or range scope
---background                 start a persistent background job
---wait                       explicitly run in the foreground
---timeout-minutes <number>   hard timeout; default 30
+--background                 start a persistent, detached background job
+--wait                       run a review in the foreground; with status or result, block until the job ends
+--wait-minutes <number>      longest a status or result --wait call blocks; default 5
+--timeout-minutes <number>   hard timeout for the Claude process; default 30
+--max-budget-usd <amount>    pass an API billing cap to Claude Code
 ```
 
 ## Job controls
 
 ```text
-claude-review.mjs status [job-id] [--dir <path>]
-claude-review.mjs result [job-id] [--dir <path>]
+claude-review.mjs status [job-id] [--wait] [--dir <path>]
+claude-review.mjs result [job-id] [--wait] [--dir <path>]
 claude-review.mjs cancel [job-id] [--dir <path>]
 ```
 
-When no job ID is supplied, operate on the latest applicable job.
+When no job ID is supplied, operate on the latest applicable job. With `--wait`, `status` and `result` poll the job
+until it reaches a terminal status or `--wait-minutes` elapses, then print it; a still-running job says so, and
+another `--wait` call keeps waiting.
 
 ## Important mappings
 

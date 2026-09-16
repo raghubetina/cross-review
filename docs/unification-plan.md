@@ -1,7 +1,8 @@
 # Plan: unify claude-review and codex-review, then improve both
 
 Status: revision 4, 2026-09-16, after two Codex review rounds (see section
-10) and the author's decisions (section 9). Ready to execute. Nothing here is implemented yet except where marked "(done in
+10) and the author's decisions (section 9). Phases 0 and 1 were completed the
+same day; the rest is ready to execute. Nothing here is implemented yet except where marked "(done in
 codex-review)".
 
 ## 1. Goals

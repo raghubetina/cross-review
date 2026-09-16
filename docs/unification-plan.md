@@ -454,6 +454,24 @@ the fence collision independently. All applied in the follow-up commit,
 including a security exception in rule 3, a resumed-round carve-out, and
 neutralizing a literal closing tag inside repository content.
 
+The Phase 4 range was reviewed by both plugins, each now reading its own
+prior findings and ids in the prompt; both reported the section clear and
+the id and observation rules workable, and Claude closed its five Phase 3
+findings by id as fixed. Claude (job `review-mu4i9wry-597af4`) found that a
+history rewrite deactivated a session without passing its ledger on, that
+consolidation deleted the very id the previous result had printed so a
+decision on it failed, that sessions written before the ledger existed
+crashed on focus text, that fixed findings were re-requested forever, and
+that both interface files still said ids were "still to come". Codex (job
+`review-mu4i9unc-a826a8`) reproduced the consolidation and initialization
+problems independently, showed that two distinct defects sharing a title
+were merged, and found that a failed explicit resume onto a new checkout
+identity left the retired session unfindable from that identity. All
+applied: consolidation now folds only entries the runtime itself flagged as
+resembling another and keeps the folded id as an alias; a rewritten branch
+and a failed explicit resume both hand their ledger to the replacement; the
+prompt lists fixed findings separately and no longer asks for them again.
+
 Revision 2 was reviewed on the same Codex thread (`again`, job
 `review-mu3z9uiz-58cdc5`). It confirmed 2, 3, 4, 7, and 8 resolved and raised
 five points, answered in revision 3:

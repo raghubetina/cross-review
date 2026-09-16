@@ -84,7 +84,7 @@ the artifact. If HEAD moved, the session keeps the pre-review HEAD as its last r
 ## Result format
 
 Findings are sorted by severity then confidence. Each shows its id (`F-` plus six hex characters, assigned by the
-runtime; kept across rounds once the reviewer is shown the ledger, which is still to come), severity, title, location, flags such as `pre-existing`, `persisting`, `duplicate id`, or `no location
+runtime and shown back to the reviewer in every later round), severity, title, location, flags such as `pre-existing`, `persisting`, `duplicate id`, or `no location
 cited`, then the body, the trigger, quoted evidence, confidence, and recommendation. Results end with numbered next
 steps and residual risk. The ids are recorded in the session ledger inside `session.json`.
 
@@ -95,8 +95,9 @@ A decision is your verdict on a finding, written anywhere in the focus text as `
 so it survives a review that fails or a session that retires, and shows every prior finding with its observation,
 disposition, and decision to the reviewer in each later round. A rejected finding can only come back as a
 reopen proposal with new evidence; reviewer output never changes a disposition. A decision on an id the session
-does not know fails before the reviewer runs. When a retired session is replaced, the new session inherits the
-ledger and says so.
+does not know fails before the reviewer runs. When a retired session is replaced, or the branch history is rewritten
+under an active session, the new session inherits the ledger and says so; `new` starts without it. An id printed
+with a `resembles` flag folds into the earlier finding before the next round and stays usable as an alias.
 
 ## Job controls
 

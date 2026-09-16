@@ -339,11 +339,94 @@ function defineSuite(B) {
     assert.match(replacement.result.stdout, new RegExp(`\\(resembles ${id}\\)`));
     assert.equal(Object.keys(inherited.ledger.findings).length, 2);
 
-    runReview(repo, ["again"]);
+    const [aliasId] = Object.keys(inherited.ledger.findings).filter((candidate) => candidate !== id);
+    const decided = runReview(repo, ["again", "--", `accept ${aliasId}: fine`]);
+    assert.match(decided.result.stdout, new RegExp(`Decisions: ${id} accepted \\(fine\\)`));
     const priorSection = calls(first.logPath).at(-1).input.match(/## Prior findings and decisions[\s\S]*?## What counts/)[0];
     assert.equal((priorSection.match(/^- F-/gm) ?? []).length, 1);
     assert.match(priorSection, new RegExp(`- ${id} `));
-    assert.match(priorSection, /disposition: rejected \(intentional\)/);
+    assert.match(priorSection, /disposition: accepted \(fine\)/);
+    const consolidated = sessions(repo)[1].session.ledger;
+    assert.equal(consolidated.aliases[aliasId], id);
+    assert.equal(consolidated.findings[id].disposition, "accepted");
+  });
+
+  test(`[${B.name}] a history rewrite hands the ledger to the replacement session`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const first = runReview(repo);
+    const [id] = Object.keys(sessions(repo)[0].session.ledger.findings);
+    runReview(repo, ["again", "--", `reject ${id}: intentional`]);
+    git(repo, "commit", "--allow-empty", "--amend", "-m", "rewritten history");
+    const after = runReview(repo);
+    assert.match(after.result.stdout, /Notice: Previous session .* ended because the branch history no longer continues from its last reviewed HEAD; this review started a new session\. It inherited 1 prior finding and the decisions on them\./);
+    const input = calls(first.logPath).at(-1).input;
+    assert.match(input, new RegExp(`- ${id} \\[high\\] Example defect — example\\.txt:1 — observation: new; disposition: rejected \\(intentional\\)`));
+    assert.equal(sessions(repo).length, 2);
+    assert.equal(sessions(repo)[1].session.ledger.findings[id].disposition, "rejected");
+    const fresh = runReview(repo, ["new", "working"]);
+    assert.doesNotMatch(fresh.result.stdout, /inherited/);
+    assert.doesNotMatch(calls(first.logPath).at(-1).input, /## Prior findings and decisions/);
+    assert.equal(Object.keys(sessions(repo)[2].session.ledger.findings).length, 1);
+  });
+
+  test(`[${B.name}] a failed explicit resume leaves its ledger to the replacement at the destination identity`, () => {
+    const repo = createRepo();
+    const base = git(repo, "rev-parse", "HEAD");
+    fs.writeFileSync(path.join(repo, "example.txt"), "reviewed\n", "utf8");
+    git(repo, "add", "example.txt");
+    git(repo, "commit", "-m", "reviewed candidate");
+    const reviewed = git(repo, "rev-parse", "HEAD");
+    git(repo, "checkout", "--detach", reviewed);
+    const first = runReview(repo, ["new", "range", `${base}..${reviewed}`]);
+    const sessionId = sessions(repo)[0].session.session_id;
+    const [id] = Object.keys(sessions(repo)[0].session.ledger.findings);
+
+    fs.writeFileSync(path.join(repo, "example.txt"), "fixed\n", "utf8");
+    git(repo, "add", "example.txt");
+    git(repo, "commit", "-m", "fix review finding");
+    const fixed = git(repo, "rev-parse", "HEAD");
+    const failed = command(
+      process.execPath,
+      [RUNTIME, "--dir", repo, "--resume-session", sessionId, "range", `${reviewed}..${fixed}`, "--", `reject ${id}: by design`],
+      { cwd: repo, env: reviewEnv(first.logPath, { [B.failEnv]: "1" }), allowFailure: true }
+    );
+    assert.notEqual(failed.status, 0);
+    const retired = sessions(repo)[0].session;
+    assert.equal(retired.active, false);
+    assert.equal(retired.branch, `detached-${reviewed.slice(0, 12)}`);
+    assert.equal(retired.retired_checkout_identity, `detached-${fixed.slice(0, 12)}`);
+    assert.equal(retired.ledger.findings[id].disposition, "rejected");
+
+    const replacement = runReview(repo, ["range", `${reviewed}..${fixed}`]);
+    assert.match(replacement.result.stdout, /Notice: Previous session .* was retired; this review started a new isolated session\. It inherited 1 prior finding and the decisions on them\./);
+    assert.equal(sessions(repo)[1].session.branch, `detached-${fixed.slice(0, 12)}`);
+    assert.equal(sessions(repo)[1].session.ledger.findings[id].disposition, "rejected");
+    assert.match(calls(first.logPath).at(-1).input, /disposition: rejected \(by design\)/);
+  });
+
+  test(`[${B.name}] fixed findings are listed as resolved and need not be repeated`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const first = runReview(repo);
+    const [id] = Object.keys(sessions(repo)[0].session.ledger.findings);
+    runReview(repo, ["again"], { [B.reportIdEnv]: id, [B.observationEnv]: "fixed" });
+    runReview(repo, ["again"], { [B.titleEnv]: "Other defect" });
+    const input = calls(first.logPath).at(-1).input;
+    assert.match(input, /- \(none still open\)\n\nResolved earlier; report one only if it has regressed, as reopen_proposed:\n\n- F-/);
+    assert.match(input, /A finding already recorded as fixed need not be repeated unless it has regressed/);
+  });
+
+  test(`[${B.name}] a session recorded without a ledger accepts focus text`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    runReview(repo);
+    const entry = sessions(repo)[0];
+    delete entry.session.ledger;
+    fs.writeFileSync(path.join(entry.directory, "session.json"), `${JSON.stringify(entry.session, null, 2)}\n`, "utf8");
+    const { result } = runReview(repo, ["again", "--", "look at the loop"]);
+    assert.match(result.stdout, /Status: completed/);
+    assert.equal(sessions(repo)[0].session.ledger.notes.at(-1).text, "look at the loop");
   });
 
   test(`[${B.name}] observations on known ids are recorded and a rejected id can only be reopened`, () => {

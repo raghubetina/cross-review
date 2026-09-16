@@ -14,6 +14,7 @@ import {
   parseDecisions,
   parseReviewerOutput,
   renderStructured,
+  resolveFindingId,
   validateBackend
 } from "../src/runtime.mjs";
 import { BACKENDS } from "./suite.mjs";
@@ -72,20 +73,22 @@ test("parseDecisions reads verbs, ids, and reasons from focus text", () => {
   assert.deepEqual(parseDecisions("no decisions here, just rejecting nothing"), []);
 });
 
-test("consolidateLedger collapses the same file and title into the earliest id and keeps the newest decision", () => {
+test("consolidateLedger folds resembling entries into the earlier id and keeps the old id as an alias", () => {
   const ledger = {
     findings: {
-      "F-000002": { first_job: "review-b", last_job: "review-b", title: "Example defect", file: "a.js", severity: "high", observation: "persisting", disposition: "rejected", decision: { text: "later", at: "2026-02-01" } },
-      "F-000001": { first_job: "review-a", last_job: "review-a", title: "Example  Defect!", file: "a.js", severity: "high", observation: "new", disposition: "open", decision: null },
-      "F-000003": { first_job: "review-c", last_job: "review-c", title: "Other", file: "b.js", severity: "low", observation: "new" }
+      "F-000001": { first_job: "review-a", last_job: "review-a", title: "Example defect", file: "a.js", severity: "high", observation: "new", disposition: "open", decision: null },
+      "F-000002": { first_job: "review-b", last_job: "review-b", title: "Example defect", file: "a.js", severity: "high", observation: "persisting", disposition: "rejected", decision: { text: "later", at: "2026-02-01" }, resembles: "F-000001" },
+      "F-000003": { first_job: "review-c", last_job: "review-c", title: "Example defect", file: "a.js", severity: "low", observation: "new" }
     }
   };
   assert.equal(consolidateLedger(ledger), true);
   assert.deepEqual(Object.keys(ledger.findings).sort(), ["F-000001", "F-000003"]);
+  assert.deepEqual(ledger.aliases, { "F-000002": "F-000001" });
   assert.equal(ledger.findings["F-000001"].disposition, "rejected");
   assert.equal(ledger.findings["F-000001"].decision.text, "later");
-  assert.equal(ledger.findings["F-000001"].last_job, "review-b");
   assert.equal(ledger.findings["F-000001"].observation, "persisting");
+  assert.equal(resolveFindingId(ledger, "F-000002"), "F-000001");
+  assert.equal(resolveFindingId(ledger, "F-000003"), "F-000003");
   assert.equal(consolidateLedger(ledger), false);
 });
 

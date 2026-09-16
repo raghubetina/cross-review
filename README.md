@@ -51,7 +51,7 @@ Every review returns a verdict, a terse summary, findings, next steps, and resid
 
 ## Decisions
 
-Your verdict on a finding is a decision, written anywhere in the focus text: `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`. The runtime records it before the reviewer starts, so it survives a failed review or a retired session, and it shows every prior finding with its observation, disposition, and decision to the reviewer in each later round. Reviewer output never changes a disposition: a rejected finding can only come back as a reopen proposal with new evidence. When a retired session is replaced, the new session inherits the ledger and says so.
+Your verdict on a finding is a decision, written anywhere in the focus text: `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`. The runtime records it before the reviewer starts, so it survives a failed review or a retired session, and it shows every prior finding with its observation, disposition, and decision to the reviewer in each later round. Reviewer output never changes a disposition: a rejected finding can only come back as a reopen proposal with new evidence. When a retired session is replaced, or the branch history is rewritten under an active session, the new session inherits the ledger and says so; `new` starts without it. An id printed with a `resembles` flag folds into the earlier finding before the next round and stays usable as an alias.
 
 ## Reviewer capabilities
 

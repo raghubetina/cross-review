@@ -100,43 +100,48 @@ function ledgerKey(entry) {
   return `${entry.file ?? ""}\0${normalizedTitle(entry.title)}`;
 }
 
-// Rounds that could not reference ids left one entry per round per defect;
-// entries with the same file and title collapse into the earliest id, keeping
-// the newest decision.
+export function resolveFindingId(ledger, id) {
+  const aliases = ledger?.aliases ?? {};
+  let current = id;
+  for (let hops = 0; hops < 16 && aliases[current]; hops += 1) current = aliases[current];
+  return current;
+}
+
+// A finding the reviewer reported without its id gets a fresh id and a
+// "resembles" hint. Before the next round, such an entry folds into the entry
+// it resembles; its id stays usable as an alias, because the user has already
+// seen it printed.
 export function consolidateLedger(ledger) {
-  const findings = ledger?.findings ?? {};
-  const groups = new Map();
-  for (const [id, entry] of Object.entries(findings)) {
-    const key = ledgerKey(entry);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push({ id, entry });
-  }
+  if (!ledger?.findings) return false;
+  ledger.aliases = ledger.aliases ?? {};
+  const findings = ledger.findings;
   let changed = false;
-  for (const members of groups.values()) {
-    if (members.length < 2) continue;
-    members.sort((left, right) => String(left.entry.first_job ?? "").localeCompare(String(right.entry.first_job ?? "")) || left.id.localeCompare(right.id));
-    const [survivor, ...merged] = members;
-    for (const { id, entry } of merged) {
-      if (entry.decision && (!survivor.entry.decision || String(entry.decision.at) > String(survivor.entry.decision.at))) {
-        survivor.entry.decision = entry.decision;
-        survivor.entry.disposition = entry.disposition;
-      }
-      if (String(entry.last_job ?? "") > String(survivor.entry.last_job ?? "")) {
-        survivor.entry.last_job = entry.last_job;
-        survivor.entry.observation = entry.observation;
-        survivor.entry.severity = entry.severity;
-        survivor.entry.line_start = entry.line_start;
-      }
-      delete findings[id];
-      changed = true;
+  for (const [id, entry] of Object.entries(findings)) {
+    if (!entry.resembles) continue;
+    const survivorId = resolveFindingId(ledger, entry.resembles);
+    const survivor = findings[survivorId];
+    if (!survivor || survivorId === id) continue;
+    if (entry.decision && (!survivor.decision || String(entry.decision.at) > String(survivor.decision.at))) {
+      survivor.decision = entry.decision;
+      survivor.disposition = entry.disposition;
     }
+    if (String(entry.last_job ?? "") > String(survivor.last_job ?? "")) {
+      survivor.last_job = entry.last_job;
+      survivor.observation = entry.observation;
+      survivor.severity = entry.severity;
+      survivor.line_start = entry.line_start;
+    }
+    ledger.aliases[id] = survivorId;
+    delete findings[id];
+    changed = true;
   }
   return changed;
 }
 
 function applyDecisions(session, focus, jobIdValue) {
-  const decisions = parseDecisions(focus);
-  const findings = session.ledger?.findings ?? {};
+  session.ledger = session.ledger ?? { findings: {}, notes: [] };
+  const decisions = parseDecisions(focus).map((decision) => ({ ...decision, id: resolveFindingId(session.ledger, decision.id) }));
+  const findings = session.ledger.findings;
   const unknown = decisions.filter((decision) => !findings[decision.id]).map((decision) => decision.id);
   if (unknown.length) {
     const known = Object.keys(findings);
@@ -572,9 +577,12 @@ function activeSession(root, branch) {
     .sort((left, right) => String(right.session.created_at).localeCompare(String(left.session.created_at)))[0] ?? null;
 }
 
+// A session retired by a failed explicit resume keeps its accepted identity,
+// but the user was told to continue at the failed job's destination; the
+// retired session is therefore also found from that destination identity.
 function latestRetiredSession(root, branch) {
   const latestDeactivation = loadSessions(root)
-    .filter(({ session }) => !session.active && session.branch === branch)
+    .filter(({ session }) => !session.active && (session.branch === branch || session.retired_checkout_identity === branch))
     .map((entry) => ({
       ...entry,
       deactivatedAt: [entry.session.retired_at, entry.session.reset_at].filter(Boolean).sort().at(-1) ?? ""
@@ -625,12 +633,13 @@ function sessionById(root, repoRoot, sessionId) {
   return entry;
 }
 
-function retireSessionAfterUnappliedInvocation(taskDirectory, acceptedSession, jobId) {
+function retireSessionAfterUnappliedInvocation(taskDirectory, acceptedSession, jobId, checkoutIdentity = null) {
   const retired = {
     ...acceptedSession,
     active: false,
     retired_at: new Date().toISOString(),
     retired_job_id: jobId,
+    retired_checkout_identity: checkoutIdentity,
     retired_reason: retiredSessionGuidanceText()
   };
   saveSession(taskDirectory, retired);
@@ -958,11 +967,13 @@ async function prepareJob(parsed, repoRoot, root) {
         `${label()} review session ${entry.session.session_id} cannot resume because its last reviewed HEAD is not an ancestor of the current HEAD.`
       );
     }
+    let rewriteDonor = null;
     if (entry && !explicitlySelected && !historyContinues(repoRoot, entry.session)) {
       entry.session.active = false;
       entry.session.reset_at = new Date().toISOString();
       entry.session.reset_reason = "branch history no longer continues from the last reviewed HEAD";
       saveSession(entry.directory, entry.session);
+      rewriteDonor = entry;
       entry = null;
       if (parsed.action === "again") {
         throw new Error("The branch history changed since the last review. Start a new review instead of using again.");
@@ -972,6 +983,7 @@ async function prepareJob(parsed, repoRoot, root) {
       deactivateBranchSessions(root, branch);
       entry = null;
       retiredEntry = null;
+      rewriteDonor = null;
     }
 
     if (entry) {
@@ -1001,7 +1013,7 @@ async function prepareJob(parsed, repoRoot, root) {
           saveJob(root, existingJob);
           if (existingJob.reviewer_started_at && !resultWasApplied) {
             const retiredSessionId = entry.session.session_id;
-            retireSessionAfterUnappliedInvocation(entry.directory, entry.session, existingJob.id);
+            retireSessionAfterUnappliedInvocation(entry.directory, entry.session, existingJob.id, existingJob.checkout_identity ?? null);
             existingJob.error = `${existingJob.error} ${retiredSessionGuidanceText()}`;
             saveJob(root, existingJob);
             retiredEntry = {
@@ -1022,12 +1034,14 @@ async function prepareJob(parsed, repoRoot, root) {
       }
     }
     let inheritedFindings = 0;
+    let inheritedLedger = false;
     if (!entry) {
-      const inherited = retiredEntry?.session?.ledger ?? null;
+      const inherited = (retiredEntry ?? rewriteDonor)?.session?.ledger ?? null;
       entry = createTask(root, repoRoot, branch, parsed.options.model, inherited);
-      inheritedFindings = Object.keys(inherited?.findings ?? {}).length;
+      inheritedLedger = Boolean(inherited);
     }
     if (consolidateLedger(entry.session.ledger)) saveSession(entry.directory, entry.session);
+    if (inheritedLedger) inheritedFindings = Object.keys(entry.session.ledger.findings).length;
 
     const scope = resolveScope(
       repoRoot,
@@ -1102,6 +1116,7 @@ async function prepareJob(parsed, repoRoot, root) {
       backend_options: parsed.options.backendOptions,
       resumed: entry.session.review_count > 0,
       started_after_retired_session_id: retiredEntry?.session?.session_id ?? null,
+      started_after_rewrite_session_id: retiredEntry ? null : rewriteDonor?.session?.session_id ?? null,
       artifact: null,
       error: null,
       result_summary: null
@@ -1244,17 +1259,19 @@ function collectReviewContext(job) {
 function priorFindingsSection(session) {
   const findings = Object.entries(session?.ledger?.findings ?? {});
   if (!findings.length) return "";
-  const lines = findings.map(([id, entry]) => {
+  const line = ([id, entry]) => {
     const location = entry.file ? ` — ${entry.file}${entry.line_start ? `:${entry.line_start}` : ""}` : "";
     const decision = entry.decision?.text ? ` (${entry.decision.text})` : "";
     return `- ${id} [${entry.severity}] ${entry.title}${location} — observation: ${entry.observation ?? "new"}; disposition: ${entry.disposition ?? "open"}${decision}`;
-  });
+  };
+  const open = findings.filter(([, entry]) => entry.observation !== "fixed").map(line);
+  const resolved = findings.filter(([, entry]) => entry.observation === "fixed").map(line);
   const notes = (session.ledger.notes ?? []).slice(-10).map((note) => `- ${note.text}`);
   return `## Prior findings and decisions
 
 These findings were recorded in earlier rounds of this review session. The disposition is the user's verdict: open means undecided, accepted means the user agrees and will fix it, rejected means the user has decided against it, deferred means later.
 
-${lines.join("\n")}${notes.length ? `\n\nEarlier user notes:\n\n${notes.join("\n")}` : ""}
+${open.length ? open.join("\n") : "- (none still open)"}${resolved.length ? `\n\nResolved earlier; report one only if it has regressed, as reopen_proposed:\n\n${resolved.join("\n")}` : ""}${notes.length ? `\n\nEarlier user notes:\n\n${notes.join("\n")}` : ""}
 
 `;
 }
@@ -1304,7 +1321,7 @@ ${Object.keys(session?.ledger?.findings ?? {}).length
 
 The summary is a terse ship or no-ship assessment, not a recap. Order findings by severity.${job.resumed || Object.keys(session?.ledger?.findings ?? {}).length ? `
 
-Tests 1 and 4 govern findings raised for the first time. A finding already reported in this conversation stays in scope even when the current change does not touch its lines: report it with observation persisting, fixed, or reopen_proposed rather than moving it to residual_risk.` : ""}`;
+Tests 1 and 4 govern findings raised for the first time. A finding already reported in this conversation stays in scope even when the current change does not touch its lines: report it with observation persisting, fixed, or reopen_proposed rather than moving it to residual_risk. A finding already recorded as fixed need not be repeated unless it has regressed; then report it as reopen_proposed.` : ""}`;
 }
 
 function buildPrompt(job, session) {
@@ -1511,7 +1528,7 @@ export function normalizeStructured(structured, job, session) {
     if (Number.isInteger(normalized.line_start) && Number.isInteger(normalized.line_end) && normalized.line_end < normalized.line_start) {
       normalized.line_end = normalized.line_start;
     }
-    let id = typeof normalized.id === "string" && FINDING_ID.test(normalized.id) ? normalized.id : null;
+    let id = typeof normalized.id === "string" && FINDING_ID.test(normalized.id) ? resolveFindingId(session?.ledger, normalized.id) : null;
     if (id && !known.has(id)) id = null;
     normalized.duplicate = Boolean(id && seen.has(id));
     if (!id) {
@@ -1550,6 +1567,7 @@ function recordFindings(session, job, structured) {
       line_start: finding.line_start ?? null,
       pre_existing: Boolean(finding.pre_existing),
       observation: finding.observation,
+      resembles: entry.resembles ?? finding.resembles ?? null,
       disposition: entry.disposition ?? "open",
       decision: entry.decision ?? null
     });
@@ -1882,7 +1900,7 @@ async function executeJob(root, job) {
         ? `${failure} ${retiredSessionGuidanceText()}`
         : failure;
       if (reviewerInvocationStarted) {
-        retireSessionAfterUnappliedInvocation(job.task_directory, acceptedSession, job.id);
+        retireSessionAfterUnappliedInvocation(job.task_directory, acceptedSession, job.id, job.checkout_identity ?? null);
       }
       const failedDirectory = path.join(job.task_directory, "failed");
       fs.mkdirSync(failedDirectory, { recursive: true });
@@ -1956,6 +1974,14 @@ function renderJob(root, job, includeResult = false) {
       : "";
     lines.push(
       `Notice: Previous session ${job.started_after_retired_session_id} was retired; this review started a new isolated session.${inherited}`
+    );
+  }
+  if (job.started_after_rewrite_session_id) {
+    const inherited = job.inherited_findings
+      ? ` It inherited ${job.inherited_findings} prior finding${job.inherited_findings === 1 ? "" : "s"} and the decisions on them.`
+      : "";
+    lines.push(
+      `Notice: Previous session ${job.started_after_rewrite_session_id} ended because the branch history no longer continues from its last reviewed HEAD; this review started a new session.${inherited}`
     );
   }
   if (job.decisions?.length) {

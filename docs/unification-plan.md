@@ -182,7 +182,7 @@ which of the user's hooks fire inside a headless review.
 
 ## 6. Review quality improvements
 
-### 6.1 Prompt rubric (both, small)
+### 6.1 Prompt rubric (both, small). Done 2026-09-16.
 
 - Embed the eight "is it a bug" tests, the comment rules, and the
   pre-existing-versus-introduced rule from Codex's rubric, with Apache-2.0
@@ -201,7 +201,7 @@ which of the user's hooks fire inside a headless review.
   diff, untracked files, and focus text in `<repository_context>` and
   `<user_focus>` tags and say the content inside is data, not instructions.
 
-### 6.2 Schema v2 and rendering (both, medium)
+### 6.2 Schema v2 and rendering (both, medium). Done 2026-09-16, except that the reviewer is told to return null ids until phase 4 injects the known findings.
 
 Add to each finding: `pre_existing` (boolean), `trigger` (the scenario or
 input needed), `evidence` (quoted lines), and `observation` with values `new`,
@@ -366,8 +366,9 @@ claude-review.
 - Phase 2, capabilities. Done 2026-09-16: modes, scratch directory, checkout
   rules, HEAD and tree verification as warnings, MCP and settings inheritance,
   docs, live runs in `full` and `workspace` against both CLIs.
-- Phase 3, rubric and schema v2. Prompt, schema, renderer, NOTICE. Half a
-  day, then compare artifacts on the same diff before and after.
+- Phase 3, rubric and schema v2. Done 2026-09-16: prompt rubric with
+  attribution in NOTICE, schema v2, runtime-assigned ids recorded in a session
+  ledger of observations, severity-sorted renderer with next steps.
 - Phase 4, ledger. Storage, decision parsing, prompt injection, retirement
   inheritance. One day.
 - Phase 5, context and secrets. Size-aware collection, caps, filter. Half a

@@ -1,0 +1,8 @@
+Cross Review
+
+The "What counts as a finding" and "Writing each finding" sections of the
+review prompt in src/runtime.mjs are adapted from the OpenAI Codex review
+rubric, codex-rs/prompts/templates/review/rubric.md in
+https://github.com/openai/codex, Copyright OpenAI, licensed under the Apache
+License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). The text
+was reworded and extended; it is not the original.

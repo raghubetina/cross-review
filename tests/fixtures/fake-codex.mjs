@@ -72,16 +72,22 @@ const structured = {
   summary: "One material issue found.",
   findings: [
     {
+      id: null,
+      observation: "new",
       severity: "high",
       title: "Example defect",
       body: "The fake reviewer found a deterministic defect.",
       file: "example.txt",
       line_start: 1,
       line_end: 1,
+      pre_existing: false,
+      trigger: "Any call.",
+      evidence: "example.txt:1 first",
       confidence: 0.95,
       recommendation: "Fix the example."
     }
   ],
+  next_steps: ["Fix the example."],
   residual_risk: "The fake reviewer did not execute tests."
 };
 const text = JSON.stringify(structured);

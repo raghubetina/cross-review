@@ -10,8 +10,10 @@ import claudeBackend from "../src/backends/claude.mjs";
 import codexBackend from "../src/backends/codex.mjs";
 import {
   REVIEW_SCHEMA,
+  normalizeStructured,
   parseArguments,
   parseReviewerOutput,
+  renderStructured,
   resolveRepository,
   resolveScope,
   validateBackend
@@ -130,8 +132,61 @@ test.before(() => {
   for (const backend of BACKENDS) fs.chmodSync(backend.fake, 0o755);
 });
 
-test("review schema carries no $schema key", () => {
+test("review schema carries no $schema key and requires every v2 field", () => {
   assert.equal("$schema" in REVIEW_SCHEMA, false);
+  assert.deepEqual(REVIEW_SCHEMA.required, ["verdict", "summary", "findings", "next_steps", "residual_risk"]);
+  const finding = REVIEW_SCHEMA.properties.findings.items;
+  assert.deepEqual(finding.required, Object.keys(finding.properties));
+  assert.deepEqual(finding.properties.observation.enum, ["new", "persisting", "fixed", "reopen_proposed"]);
+});
+
+test("normalizeStructured assigns ids, sorts by severity then confidence, and flags problems", () => {
+  const job = { scope: { kind: "working" } };
+  const session = { ledger: { findings: { "F-aaaaaa": { title: "known" } } } };
+  const base = { body: "b", pre_existing: false, trigger: "", evidence: "", recommendation: "" };
+  const structured = normalizeStructured({
+    verdict: "needs-attention",
+    summary: "s",
+    findings: [
+      { ...base, id: null, observation: "new", severity: "low", title: "low one", file: "a.js", line_start: 5, line_end: 2, confidence: 0.9 },
+      { ...base, id: "F-aaaaaa", observation: "persisting", severity: "high", title: "known", file: "a.js", line_start: 1, line_end: 1, confidence: 0.5 },
+      { ...base, id: "F-aaaaaa", observation: "persisting", severity: "high", title: "known again", file: "a.js", line_start: 9, line_end: 9, confidence: 0.4 },
+      { ...base, id: "F-zzzzzz", observation: "bogus", severity: "high", title: "invented id", file: null, line_start: null, line_end: null, confidence: 0.99 },
+      { ...base, id: null, observation: "new", severity: "critical", title: "worst", file: "b.js", line_start: 3, line_end: 4, confidence: 0.7 }
+    ],
+    next_steps: [],
+    residual_risk: ""
+  }, job, session);
+  const titles = structured.findings.map((finding) => finding.title);
+  assert.deepEqual(titles, ["worst", "invented id", "known", "known again", "low one"]);
+  const byTitle = Object.fromEntries(structured.findings.map((finding) => [finding.title, finding]));
+  assert.match(byTitle.worst.id, /^F-[0-9a-f]{6}$/);
+  assert.notEqual(byTitle["invented id"].id, "F-zzzzzz");
+  assert.equal(byTitle["invented id"].observation, "new");
+  assert.equal(byTitle["invented id"].location_missing, true);
+  assert.equal(byTitle.known.id, "F-aaaaaa");
+  assert.equal(byTitle.known.duplicate, false);
+  assert.equal(byTitle["known again"].duplicate, true);
+  assert.equal(byTitle["low one"].line_end, 5);
+  assert.equal(normalizeStructured({ findings: [{ ...base, id: null, severity: "low", title: "t", file: null, line_start: null, confidence: 1 }] }, { scope: { kind: "repo" } }, {}).findings[0].location_missing, false);
+});
+
+test("renderStructured shows ids, flags, trigger, evidence, and next steps", () => {
+  const rendered = renderStructured({
+    verdict: "needs-attention",
+    summary: "One issue.",
+    findings: [{
+      id: "F-123abc", observation: "persisting", severity: "high", title: "Fix it", body: "Because.", file: "a.js",
+      line_start: 2, line_end: 3, pre_existing: true, trigger: "Empty input.", evidence: "a.js:2 x = y / 0", confidence: 0.8,
+      recommendation: "Guard it.", duplicate: false, location_missing: false
+    }],
+    next_steps: ["Guard the divisor", "Add a test"],
+    residual_risk: "None."
+  });
+  assert.match(rendered, /### 1\. \[HIGH\] F-123abc Fix it — a\.js:2-3 \(persisting, pre-existing\)/);
+  assert.match(rendered, /Trigger: Empty input\./);
+  assert.match(rendered, /Evidence:\n\n```\na\.js:2 x = y \/ 0\n```/);
+  assert.match(rendered, /## Next steps\n\n1\. Guard the divisor\n2\. Add a test/);
 });
 
 test("codex backend reads the thread ID, usage, and structured last message from JSONL", () => {
@@ -346,7 +401,20 @@ function defineSuite(B) {
     assert.match(invocation.input, /never commit or push/);
     assert.ok(fs.existsSync(path.join(sessions(repo)[0].directory, "scratch")));
     assert.match(result.stdout, /Capability: full/);
-    assert.deepEqual(invocation.schemaKeys, ["verdict", "summary", "findings", "residual_risk"]);
+    assert.deepEqual(invocation.schemaKeys, ["verdict", "summary", "findings", "next_steps", "residual_risk"]);
+    assert.match(invocation.input, /## What counts as a finding/);
+    assert.match(invocation.input, /4\. It was introduced by the change under review/);
+    assert.match(invocation.input, /<repository_context>\n[\s\S]*\+changed[\s\S]*<\/repository_context>$/);
+    assert.match(invocation.input, /<user_focus>\nfocus on correctness\n<\/user_focus>/);
+    assert.doesNotMatch(invocation.input, /Session metadata/);
+    assert.match(result.stdout, /### 1\. \[HIGH\] F-[0-9a-f]{6} Example defect — example\.txt:1/);
+    assert.match(result.stdout, /## Next steps\n\n1\. Fix the example\./);
+    const ledger = sessions(repo)[0].session.ledger.findings;
+    const [ledgerId] = Object.keys(ledger);
+    assert.match(ledgerId, /^F-[0-9a-f]{6}$/);
+    assert.equal(ledger[ledgerId].title, "Example defect");
+    assert.equal(ledger[ledgerId].first_job, jobs(repo)[0].job.id);
+    assert.equal(ledger[ledgerId].observation, "new");
     assert.match(result.stdout, new RegExp(`${B.conversationLabel}: ${invocation.conversationId}`));
     assert.match(invocation.input, /focus on correctness/);
     assert.match(invocation.input, /-first/);
@@ -362,6 +430,15 @@ function defineSuite(B) {
     assert.ok(fs.readdirSync(task.directory).some((name) => /^001-working\.md$/.test(name)));
     assert.equal(git(repo, "check-ignore", `${B.artifactDir}/001-probe`), `${B.artifactDir}/001-probe`);
     assert.doesNotMatch(fs.existsSync(path.join(repo, ".gitignore")) ? fs.readFileSync(path.join(repo, ".gitignore"), "utf8") : "", new RegExp(B.artifactBasename));
+  });
+
+  test(`[${B.name}] repo scope asks for pre-existing defects and drops the introduced-only rule`, () => {
+    const repo = createRepo();
+    const { logPath } = runReview(repo, ["repo"]);
+    const input = calls(logPath)[0].input;
+    assert.match(input, /pre-existing defects are the point/);
+    assert.doesNotMatch(input, /It was introduced by the change under review/);
+    assert.doesNotMatch(input, /<user_focus>\n/);
   });
 
   test(`[${B.name}] again resumes the exact session and forwards feedback`, () => {

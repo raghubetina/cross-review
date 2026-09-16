@@ -45,6 +45,10 @@ Details: [SKILL.md](plugins/claude-review/skills/claude-review/SKILL.md) and [in
 
 Once a reviewer process starts, any error, timeout, cancellation, worker death, checkout mismatch, malformed result, or persistence failure that prevents its result from being applied retires the plugin session at its last accepted scope and HEAD. Cancellation therefore ends continuity. `again` explains why a retired session cannot resume; an ordinary review starts a new isolated session and reports that transition. `new` starts a fresh session, and `reset` forgets the active session without deleting its artifacts. If necessary, each plugin adds its artifact directory to Git's local `info/exclude`; neither modifies the tracked `.gitignore`.
 
+## Result format
+
+Every review returns a verdict, a terse summary, findings, next steps, and residual risk, enforced by a JSON schema. Each finding carries an id (`F-` plus six hex characters, assigned by the runtime and stable for the session), an observation (`new`, `persisting`, `fixed`, or `reopen_proposed`), a severity (`critical`, `high`, `medium`, `low`, defined in the prompt with Codex's P0 to P3 meanings), a location, whether it is pre-existing, the trigger, quoted evidence, a confidence, and a recommendation. The runtime sorts findings by severity then confidence, flags a repeated id or a missing location, and records every finding in the session's ledger. The prompt embeds a rubric adapted from Codex's own review rubric (see NOTICE) plus the false-positive rules from Anthropic's code-review plugin: nothing a linter or compiler would catch, no pre-existing issues on untouched lines in change scopes, no nits a senior engineer would not raise.
+
 ## Reviewer capabilities
 
 The reviewer is the same agent you already trust to write code, so by default it can do whatever that agent can: run tests, write scratch code, install tools, download libraries, drive browsers, and call any MCP servers, hooks, and settings from your own Codex or Claude Code configuration. `--capability` selects the mode per review:

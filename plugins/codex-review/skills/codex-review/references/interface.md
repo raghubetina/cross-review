@@ -81,6 +81,13 @@ it saw before; any difference becomes a `Warning:` line naming the paths in the 
 the artifact. If HEAD moved, the session keeps the pre-review HEAD as its last reviewed commit. Explicit
 `--resume-session` reviews still fail on any change.
 
+## Result format
+
+Findings are sorted by severity then confidence. Each shows its id (`F-` plus six hex characters, stable for the
+session), severity, title, location, flags such as `pre-existing`, `persisting`, `duplicate id`, or `no location
+cited`, then the body, the trigger, quoted evidence, confidence, and recommendation. Results end with numbered next
+steps and residual risk. The ids are recorded in the session ledger inside `session.json`.
+
 ## Job controls
 
 ```text

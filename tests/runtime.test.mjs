@@ -196,7 +196,6 @@ test("foreground review creates ignored artifacts and uses hardened max-effort i
   assert.ok(invocation.args.includes("read-only"));
   assert.ok(invocation.args.includes('sandbox_mode="read-only"'));
   assert.ok(invocation.args.includes('approval_policy="never"'));
-  assert.ok(invocation.args.includes("mcp_servers={}"));
   assert.ok(invocation.args.includes('model_reasoning_effort="max"'));
   assert.ok(invocation.args.includes("--json"));
   assert.ok(invocation.args.includes("--output-schema"));

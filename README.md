@@ -70,7 +70,7 @@ and of the Claude Code session. `status`, `result`, and `cancel` manage jobs; `r
 
 Each reviewed repository gets an ignored `tmp/codex_reviews/` directory containing sequenced review artifacts, session metadata, and background-job state. If necessary, the plugin adds `tmp/codex_reviews/` to Git's local `info/exclude`; it does not modify the repository's tracked `.gitignore`.
 
-Codex receives a bounded, secret-filtered Git context over stdin and runs with a read-only sandbox, approvals set to never, and MCP servers disabled. The thread is persisted in Codex's own session store, so every result also prints a thread ID that `codex resume <thread-id>` can open interactively.
+Codex receives a bounded, secret-filtered Git context over stdin and runs with a read-only sandbox and approvals set to never. It inherits your Codex configuration, including any MCP servers you have enabled, and can call them during the review. The thread is persisted in Codex's own session store, so every result also prints a thread ID that `codex resume <thread-id>` can open interactively.
 
 ## Develop
 

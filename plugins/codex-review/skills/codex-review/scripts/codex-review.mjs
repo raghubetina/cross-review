@@ -1094,8 +1094,7 @@ function codexInvocationArgs(job, session, schemaPath, lastMessagePath) {
     "--skip-git-repo-check",
     "-c", `model_reasoning_effort=${JSON.stringify(job.effort)}`,
     "-c", 'sandbox_mode="read-only"',
-    "-c", 'approval_policy="never"',
-    "-c", "mcp_servers={}"
+    "-c", 'approval_policy="never"'
   ];
   if (job.model) shared.push("-m", job.model);
   if (job.resumed) {

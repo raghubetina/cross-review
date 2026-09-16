@@ -32,6 +32,8 @@ const BACKENDS = [
     failEnv: "FAKE_CODEX_FAIL",
     writeFileEnv: "FAKE_CODEX_WRITE_FILE",
     commitEnv: "FAKE_CODEX_COMMIT",
+    tagEnv: "FAKE_CODEX_TAG",
+    hookEnv: "FAKE_CODEX_HOOK",
     artifactDir: "tmp/codex_reviews",
     artifactSegments: ["tmp", "codex_reviews"],
     artifactBasename: "codex_reviews",
@@ -49,13 +51,8 @@ const BACKENDS = [
       assert.ok(args.includes("--skip-git-repo-check"));
       assert.ok(!args.includes("--ephemeral"));
       assert.ok(!args.includes("-m"));
-      const writable = args.find((argument) => argument.startsWith("sandbox_workspace_write.writable_roots="));
-      if (capability === "workspace") {
-        assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
-        assert.match(writable, /scratch"\]$/);
-      } else {
-        assert.equal(writable, undefined);
-      }
+      assert.equal(args.includes("sandbox_workspace_write.network_access=true"), capability === "workspace");
+      assert.ok(!args.some((argument) => argument.startsWith("sandbox_workspace_write.writable_roots=")));
     },
     skillDirectory: path.resolve(TEST_ROOT, "../plugins/codex-review/skills/codex-review"),
     skillPatterns: [
@@ -76,6 +73,8 @@ const BACKENDS = [
     failEnv: "FAKE_CLAUDE_FAIL",
     writeFileEnv: "FAKE_CLAUDE_WRITE_FILE",
     commitEnv: "FAKE_CLAUDE_COMMIT",
+    tagEnv: "FAKE_CLAUDE_TAG",
+    hookEnv: "FAKE_CLAUDE_HOOK",
     artifactDir: "tmp/claude_reviews",
     artifactSegments: ["tmp", "claude_reviews"],
     artifactBasename: "claude_reviews",
@@ -87,11 +86,12 @@ const BACKENDS = [
         assert.ok(args.includes("dontAsk"));
         assert.ok(args.includes("Read,Glob,Grep"));
         assert.ok(!args.includes("bypassPermissions"));
+        assert.equal(args[args.indexOf("--setting-sources") + 1], "user");
       } else {
         assert.ok(args.includes("bypassPermissions"));
         assert.ok(!args.includes("--tools"));
+        assert.ok(!args.includes("--setting-sources"));
       }
-      assert.ok(!args.includes("--setting-sources"));
       assert.ok(!args.includes("--strict-mcp-config"));
       assert.equal(args[args.indexOf("--effort") + 1], "max");
       assert.ok(!args.includes("--model"));
@@ -1522,12 +1522,37 @@ function defineSuite(B) {
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const { result } = runReview(repo, ["working"], { [B.writeFileEnv]: "stray.txt" });
     assert.match(result.stdout, /Status: completed/);
-    assert.match(result.stdout, /Warning: The working tree changed during the review: new or changed: \?\? stray\.txt/);
+    assert.match(result.stdout, /Warning: The checkout changed during the review: status added: \?\? stray\.txt\./);
     const job = jobs(repo)[0].job;
     assert.match(job.checkout_warning, /stray\.txt/);
-    assert.match(fs.readFileSync(job.artifact, "utf8"), /## Warning\n\nThe working tree changed during the review/);
+    assert.match(fs.readFileSync(job.artifact, "utf8"), /## Warning\n\nThe checkout changed during the review/);
     assert.equal(sessions(repo)[0].session.review_count, 1);
     assert.equal(sessions(repo)[0].session.active, true);
+  });
+
+  test(`[${B.name}] checkout changes are reported even when the reviewer fails`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const { result } = runReview(repo, ["working"], { [B.writeFileEnv]: "stray.txt", [B.failEnv]: "1" });
+    assert.notEqual(result.status, 0);
+    const job = jobs(repo)[0].job;
+    assert.equal(job.status, "failed");
+    assert.match(job.checkout_warning, /status added: \?\? stray\.txt/);
+    const artifact = fs.readFileSync(job.artifact, "utf8");
+    assert.match(artifact, /## Warning\n\nThe checkout changed during the review/);
+    assert.match(artifact, /## Error/);
+    const status = command(process.execPath, [RUNTIME, "status", job.id, "--dir", repo]).stdout;
+    assert.match(status, /Warning: The checkout changed during the review/);
+  });
+
+  test(`[${B.name}] overwriting an already-dirty file with a non-ASCII name is detected`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "café.txt"), "before\n", "utf8");
+    const { result } = runReview(repo, ["working"], { [B.writeFileEnv]: "café.txt" });
+    assert.match(result.stdout, /Status: completed/);
+    assert.match(result.stdout, /Warning: The checkout changed during the review: content changed: café\.txt\./);
+    assert.equal(fs.readFileSync(path.join(repo, "café.txt"), "utf8"), "stray\n");
+    assert.equal(sessions(repo)[0].session.last_scope.untracked_files[0], "café.txt");
   });
 
   test(`[${B.name}] a HEAD move during an ordinary review is reported and the new HEAD recorded`, () => {
@@ -1543,7 +1568,38 @@ function defineSuite(B) {
     const session = sessions(repo)[0].session;
     assert.equal(session.active, true);
     assert.equal(session.review_count, 1);
-    assert.equal(session.last_head, after);
+    assert.equal(session.last_head, before);
+    git(repo, "reset", "-q", "--hard", before);
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed again\n", "utf8");
+    const continued = runReview(repo, ["again"]);
+    assert.match(continued.result.stdout, /Session: resumed/);
+    assert.equal(sessions(repo)[0].session.review_count, 2);
+  });
+
+  test(`[${B.name}] rewriting a dirty file with identical content is not a change`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "note.txt"), "stray\n", "utf8");
+    const { result } = runReview(repo, ["working"], { [B.writeFileEnv]: "note.txt" });
+    assert.match(result.stdout, /Status: completed/);
+    assert.doesNotMatch(result.stdout, /Warning:/);
+  });
+
+  test(`[${B.name}] stray refs, hooks, and newly ignored paths are reported by name`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, ".gitignore"), "node_modules/\n", "utf8");
+    git(repo, "add", ".gitignore");
+    git(repo, "commit", "-m", "ignore node_modules");
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const { result } = runReview(repo, ["working"], {
+      [B.writeFileEnv]: "node_modules/left-behind.js",
+      [B.tagEnv]: "1",
+      [B.hookEnv]: "1"
+    });
+    assert.match(result.stdout, /Status: completed/);
+    assert.match(result.stdout, /ignored paths added: node_modules\//);
+    assert.match(result.stdout, /refs changed: refs\/tags\/stray-tag/);
+    assert.match(result.stdout, /\.git changed: hooks\/stray-hook/);
+    assert.doesNotMatch(result.stdout, /status added/);
   });
 
   test(`[${B.name}] the resume hint appears only once the reviewer has started`, () => {

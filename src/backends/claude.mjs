@@ -40,8 +40,13 @@ export default {
 
   buildArgs({ job, session, schema, capability }) {
     const args = ["-p"];
-    if (capability === "read-only") args.push("--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep");
-    else args.push("--permission-mode", "bypassPermissions");
+    // read-only loads only the user's settings so a reviewed repository's own
+    // .claude/settings.json hooks cannot run; the other modes are a normal session.
+    if (capability === "read-only") {
+      args.push("--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep", "--setting-sources", "user");
+    } else {
+      args.push("--permission-mode", "bypassPermissions");
+    }
     args.push(
       "--effort", job.effort,
       "--output-format", "json",

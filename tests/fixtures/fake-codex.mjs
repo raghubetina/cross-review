@@ -47,7 +47,15 @@ const delay = Number(process.env.FAKE_CODEX_DELAY_MS || 0);
 if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
 
 if (process.env.FAKE_CODEX_WRITE_FILE) {
-  fs.writeFileSync(path.join(process.cwd(), process.env.FAKE_CODEX_WRITE_FILE), "stray\n", "utf8");
+  const target = path.join(process.cwd(), process.env.FAKE_CODEX_WRITE_FILE);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, "stray\n", "utf8");
+}
+if (process.env.FAKE_CODEX_TAG === "1") spawnSync("git", ["tag", "stray-tag"], { cwd: process.cwd() });
+if (process.env.FAKE_CODEX_HOOK === "1") {
+  const gitDir = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: process.cwd(), encoding: "utf8" }).stdout.trim();
+  // A unique name with exclusive create: a template-installed hook may be a symlink into the user's dotfiles.
+  fs.writeFileSync(path.join(process.cwd(), gitDir, "hooks", "stray-hook"), "#!/bin/sh\nexit 0\n", { encoding: "utf8", flag: "wx" });
 }
 if (process.env.FAKE_CODEX_COMMIT === "1") {
   spawnSync("git", ["add", "-A"], { cwd: process.cwd() });

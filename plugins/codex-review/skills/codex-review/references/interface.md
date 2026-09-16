@@ -69,13 +69,17 @@ The runtime also accepts trailing focus text without `--` when unambiguous.
 ## Reviewer capabilities
 
 `full` gives the reviewer everything the Codex agent can normally do, including your MCP servers, hooks, and
-settings. `workspace` confines writes to the checkout and the scratch directory, with network access. `read-only` uses the read-only sandbox.
+settings. `workspace` keeps the `workspace-write` sandbox with network access: the checkout, `/tmp`, and the scratch
+directory are writable, and `.git` is protected so Codex cannot commit, stash, or move refs. `read-only` uses the
+read-only sandbox.
 
 Every session has a scratch directory at `<task directory>/scratch/`, ignored by Git and named in the prompt as the
 only place inside the repository the reviewer may create files; it persists across rounds. The prompt tells the
-reviewer to leave the checkout as found and never commit or push. After the review the runtime compares HEAD and
-the working tree with what it saw before; any difference becomes a `Warning:` line in the result and a warning
-section in the artifact. Explicit `--resume-session` reviews still fail on any change.
+reviewer to leave the checkout as found and never commit or push. After the review, on success or failure, the
+runtime compares HEAD, refs, the dirty set by content, newly ignored paths, and `.git` config and hooks with what
+it saw before; any difference becomes a `Warning:` line naming the paths in the result and a warning section in
+the artifact. If HEAD moved, the session keeps the pre-review HEAD as its last reviewed commit. Explicit
+`--resume-session` reviews still fail on any change.
 
 ## Job controls
 

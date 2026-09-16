@@ -110,8 +110,8 @@ runtime starts:
   conversationLabel: "Codex thread ID", resumeHint: (id) => `codex resume ${id}`,
   extraOptions: { "--max-budget-usd": { key: "max_budget_usd", usage: "..." } },
   usesLastMessageFile: true,
-  prompt: { tools, repoScope, truncation, conduct },
-  buildArgs({ job, session, schema, schemaPath, lastMessagePath }) -> argv,
+  prompt: { full: { tools, repoScope, truncation }, workspace: {...}, "read-only": {...} },
+  buildArgs({ job, session, schema, schemaPath, lastMessagePath, capability }) -> argv,
   earlyConversationId(line) -> id | null,        // optional
   parseOutput({ stdout, lastMessage }) -> { candidate, rawResult, conversationId, usage, models },
   artifactLines({ job, session, parsedOutput, invocation }) -> string[]
@@ -128,9 +128,9 @@ runtime starts:
   finding ids, sorting, and rendering (phase 3).
 - Extra options are numeric and positive for now; a backend that needs another
   kind extends the shared parser rather than working around it.
-- The prompt is shared. Backend text differs only in the four `prompt.*`
-  sentences.
-- Phase 2 will add the capability mode and scratch directory to `buildArgs`.
+- The prompt is shared. Backend text differs only in the three `prompt.*`
+  sentences per capability; the conduct paragraph, including the scratch
+  directory, is runtime text.
 
 ## 5. Reviewer capabilities
 
@@ -140,8 +140,8 @@ recorded per job and shown in the artifact header.
 | Mode | Codex backend | Claude backend |
 | --- | --- | --- |
 | full | `sandbox_mode="danger-full-access"`, `approval_policy="never"` | `--permission-mode bypassPermissions`, all tools |
-| workspace | `sandbox_mode="workspace-write"`, `network_access=true`, `writable_roots=[scratch]` | same as full (Claude Code has no OS sandbox in `-p` mode; revisit if `--settings sandbox` proves usable) |
-| read-only | `sandbox_mode="read-only"`, `approval_policy="never"` (today's behavior) | `--tools Read,Glob,Grep --permission-mode dontAsk` (today's behavior) |
+| workspace | `sandbox_mode="workspace-write"`, `network_access=true`; the checkout, `/tmp`, and scratch writable, `.git` protected | same as full (Claude Code has no OS sandbox in `-p` mode) |
+| read-only | `sandbox_mode="read-only"`, `approval_policy="never"` | `--tools Read,Glob,Grep --permission-mode dontAsk --setting-sources user`, so a reviewed repository's own hooks cannot run |
 
 The reviewer is the same agent the user already trusts to write code, so it
 inherits the user's full Codex or Claude configuration in every mode: MCP
@@ -162,13 +162,15 @@ Guardrails that apply in every mode:
    edits to tracked files, no new files outside scratch, no git commands that
    change refs, the index, the stash, or the working tree, no commits, no
    pushes, and revert any experiment before finishing.
-3. Runtime verification. Before invoking the reviewer, record HEAD and the
-   working-tree fingerprint. Afterwards, on an ordinary review, apply the
-   result and attach a warning to the job, the artifact, and the rendered
-   output if HEAD moved or the working tree changed, naming the changed paths.
-   A HEAD move is a warning rather than a failure because committing while a
-   background review runs has always been allowed and the runtime cannot tell
-   the user's commit from the reviewer's; the warning says so. Explicit
+3. Runtime verification. Before invoking the reviewer, snapshot HEAD, refs,
+   the dirty set by content, the list of ignored paths, and `.git` config and
+   hooks. Afterwards, on success or failure, attach a warning naming every
+   difference to the job, the artifact, and the rendered output. A HEAD move
+   is a warning rather than a failure because committing while a background
+   review runs has always been allowed and the runtime cannot tell the user's
+   commit from the reviewer's; the session records the pre-review HEAD as its
+   last reviewed commit so a stray commit can be undone without losing
+   continuity. Ignored paths that already existed are not compared. Explicit
    `--resume-session` reviews keep failing on any change, as today.
 4. Documented risk. In `full` mode the reviewer runs with the user's own
    privileges and network, while reading untrusted repository content.
@@ -417,6 +419,19 @@ Findings and how revision 2 answers them:
    Section 6.1 scopes the exclusions.
 8. Medium. The double-check step resolved citations against the current
    filesystem. Section 6.6 resolves them against the reviewed revision.
+
+The Phase 2 commit was reviewed by both plugins on their resumed sessions.
+Codex (job `review-mu48s46v-e34497`) reproduced two gaps: verification ran
+only on the success path, and the snapshot relied on Git-quoted paths so an
+overwrite of an already-dirty non-ASCII file went unnoticed. Claude (job
+`review-mu48s63t-0c87ff`) verified with probes that dropping
+`--setting-sources user` let a reviewed repository's `.claude/settings.json`
+hooks run even in read-only mode, that `workspace-write` already makes the
+whole checkout writable so the scratch-only wording was wrong, that recording
+the moved HEAD as last reviewed severed continuity once the stray commit was
+undone, that mtime fingerprints misreported identical rewrites, that the
+comparison ignored refs, ignored paths, and `.git` internals, and that section
+4 had drifted. All applied in the follow-up commit.
 
 Revision 2 was reviewed on the same Codex thread (`again`, job
 `review-mu3z9uiz-58cdc5`). It confirmed 2, 3, 4, 7, and 8 resolved and raised

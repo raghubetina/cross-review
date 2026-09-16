@@ -63,6 +63,7 @@ const WAIT_POLL_INTERVAL_MS = 2_000;
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 const MAX_PROMPT_CONTEXT_BYTES = 8 * 1024 * 1024;
 const MAX_UNTRACKED_FILE_BYTES = 512 * 1024;
+const MAX_FINGERPRINT_FILE_BYTES = 1024 * 1024;
 const LOCK_STALE_MS = 12 * 60 * 60 * 1000;
 const SCOPES = new Set(["working", "branch", "commit", "range", "repo"]);
 const ACTIONS = new Set(["again", "new", "reset", "status", "result", "cancel", "help"]);
@@ -627,11 +628,13 @@ function defaultBase(repoRoot) {
   throw new Error("Unable to detect a default branch. Pass an explicit base, such as: branch main");
 }
 
+// core.quotePath=false keeps non-ASCII names literal so they can be stat'ed and read back.
 function workingState(repoRoot) {
-  const status = git(repoRoot, ["status", "--short", "--untracked-files=all"]).stdout.trim();
-  const staged = git(repoRoot, ["diff", "--cached", "--name-only"]).stdout.trim().split("\n").filter(Boolean);
-  const unstaged = git(repoRoot, ["diff", "--name-only"]).stdout.trim().split("\n").filter(Boolean);
-  const untracked = git(repoRoot, ["ls-files", "--others", "--exclude-standard"]).stdout.trim().split("\n").filter(Boolean);
+  const plain = ["-c", "core.quotePath=false"];
+  const status = git(repoRoot, [...plain, "status", "--short", "--untracked-files=all"]).stdout.trim();
+  const staged = git(repoRoot, [...plain, "diff", "--cached", "--name-only"]).stdout.trim().split("\n").filter(Boolean);
+  const unstaged = git(repoRoot, [...plain, "diff", "--name-only"]).stdout.trim().split("\n").filter(Boolean);
+  const untracked = git(repoRoot, [...plain, "ls-files", "--others", "--exclude-standard"]).stdout.trim().split("\n").filter(Boolean);
   return { status, staged, unstaged, untracked, dirty: Boolean(status) };
 }
 
@@ -642,9 +645,16 @@ function workingFingerprint(repoRoot, state) {
   hash.update(git(repoRoot, ["diff", "--raw", "--no-ext-diff", "--no-textconv"]).stdout);
   const files = [...new Set([...state.staged, ...state.unstaged, ...state.untracked])];
   for (const file of files) {
+    const absolute = path.join(repoRoot, file);
     try {
-      const stat = fs.statSync(path.join(repoRoot, file));
-      hash.update(`${file}\0${stat.size}\0${stat.mtimeMs}\n`);
+      const stat = fs.statSync(absolute);
+      if (stat.isFile() && stat.size <= MAX_FINGERPRINT_FILE_BYTES) {
+        hash.update(`${file}\0${stat.mode}\0`);
+        hash.update(fs.readFileSync(absolute));
+        hash.update("\n");
+      } else {
+        hash.update(`${file}\0${stat.mode}\0${stat.size}\0${stat.mtimeMs}\n`);
+      }
     } catch {
       hash.update(`${file}\0unreadable\n`);
     }
@@ -1202,9 +1212,8 @@ async function invokeReviewer(root, job, session, onSpawn = () => {}, onConversa
     );
   }
   const capability = job.capability ?? DEFAULT_CAPABILITY;
-  const scratchDir = scratchDirectory(job);
-  if (capability !== "read-only") fs.mkdirSync(scratchDir, { recursive: true });
-  const args = backend.buildArgs({ job, session, schema: REVIEW_SCHEMA, schemaPath, lastMessagePath, scratchDir, capability });
+  if (capability !== "read-only") fs.mkdirSync(scratchDirectory(job), { recursive: true });
+  const args = backend.buildArgs({ job, session, schema: REVIEW_SCHEMA, schemaPath, lastMessagePath, capability });
   const prompt = buildPrompt(job, session);
   const timeoutMs = job.timeout_minutes * 60 * 1000;
   return new Promise((resolve, reject) => {
@@ -1363,7 +1372,7 @@ function artifactMarkdown(job, session, parsedOutput, invocation, status = "comp
     : parsedOutput?.rawResult || `(${label()} did not return a usable review.)`;
   const warning = job.checkout_warning ? `## Warning\n\n${job.checkout_warning}\n\n` : "";
   const body = error
-    ? `## Error\n\n${error}\n${parsedOutput ? `\n## Review output (not applied)\n\n${reviewBody}` : ""}`
+    ? `${warning}## Error\n\n${error}\n${parsedOutput ? `\n## Review output (not applied)\n\n${reviewBody}` : ""}`
     : `${warning}${reviewBody}`;
   const extraLines = backend.artifactLines?.({ job, session, parsedOutput, invocation }) ?? [];
   return `# ${label()} Review
@@ -1398,22 +1407,75 @@ ${body}
 `;
 }
 
-function treeSnapshot(repoRoot) {
-  const state = workingState(repoRoot);
-  return { status: state.status, fingerprint: state.dirty ? workingFingerprint(repoRoot, state) : "" };
+function digestPath(absolute) {
+  try {
+    const stat = fs.statSync(absolute);
+    if (!stat.isFile()) return `${stat.mode}:${stat.isDirectory() ? "directory" : "special"}`;
+    if (stat.size <= MAX_FINGERPRINT_FILE_BYTES) {
+      return `${stat.mode}:${crypto.createHash("sha256").update(fs.readFileSync(absolute)).digest("hex")}`;
+    }
+    return `${stat.mode}:${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return "unreadable";
+  }
 }
 
-function describeTreeChange(before, after) {
-  if (before.status === after.status && before.fingerprint === after.fingerprint) return null;
+function gitDirectory(repoRoot) {
+  const gitPath = git(repoRoot, ["rev-parse", "--git-dir"]).stdout.trim();
+  return path.isAbsolute(gitPath) ? gitPath : path.resolve(repoRoot, gitPath);
+}
+
+// What the reviewer is allowed to leave behind is nothing, so the snapshot
+// covers everything a stray process or a prompt-injected reviewer could touch
+// short of ignored files that already existed: HEAD and refs, the dirty set by
+// content, newly ignored paths, and .git config and hooks.
+function checkoutSnapshot(repoRoot) {
+  const state = workingState(repoRoot);
+  const files = {};
+  for (const file of new Set([...state.staged, ...state.unstaged, ...state.untracked])) {
+    files[file] = digestPath(path.join(repoRoot, file));
+  }
+  const artifactPrefix = `${artifactRelative()}/`;
+  const ignored = git(repoRoot, ["-c", "core.quotePath=false", "ls-files", "--others", "--ignored", "--exclude-standard", "--directory"])
+    .stdout.split("\n").filter(Boolean).filter((entry) => !entry.startsWith(artifactPrefix)).sort();
+  const refs = {};
+  for (const line of git(repoRoot, ["for-each-ref", "--format=%(refname) %(objectname)"]).stdout.split("\n").filter(Boolean)) {
+    const [name, object] = line.split(" ");
+    refs[name] = object;
+  }
+  const gitDir = gitDirectory(repoRoot);
+  const internals = { config: digestPath(path.join(gitDir, "config")) };
+  const hooksDir = path.join(gitDir, "hooks");
+  if (fs.existsSync(hooksDir)) {
+    for (const name of fs.readdirSync(hooksDir).sort()) internals[`hooks/${name}`] = digestPath(path.join(hooksDir, name));
+  }
+  return { head: headCommit(repoRoot), status: state.status, files, ignored, refs, internals };
+}
+
+function differingKeys(before, after) {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  return [...keys].filter((key) => before[key] !== after[key]).sort();
+}
+
+function describeCheckoutChange(before, after) {
+  const parts = [];
   const beforeLines = new Set(before.status.split("\n").filter(Boolean));
   const afterLines = new Set(after.status.split("\n").filter(Boolean));
   const added = [...afterLines].filter((line) => !beforeLines.has(line));
   const removed = [...beforeLines].filter((line) => !afterLines.has(line));
-  const parts = [];
-  if (added.length) parts.push(`new or changed: ${added.join(", ")}`);
-  if (removed.length) parts.push(`no longer reported: ${removed.join(", ")}`);
-  if (!parts.length) parts.push("already modified files changed further");
-  return parts.join("; ");
+  if (added.length) parts.push(`status added: ${added.join(", ")}`);
+  if (removed.length) parts.push(`status removed: ${removed.join(", ")}`);
+  const changedContent = differingKeys(before.files, after.files).filter((file) => file in before.files && file in after.files);
+  if (changedContent.length) parts.push(`content changed: ${changedContent.join(", ")}`);
+  const ignoredAdded = after.ignored.filter((entry) => !before.ignored.includes(entry));
+  const ignoredRemoved = before.ignored.filter((entry) => !after.ignored.includes(entry));
+  if (ignoredAdded.length) parts.push(`ignored paths added: ${ignoredAdded.join(", ")}`);
+  if (ignoredRemoved.length) parts.push(`ignored paths removed: ${ignoredRemoved.join(", ")}`);
+  const changedRefs = differingKeys(before.refs, after.refs);
+  if (changedRefs.length) parts.push(`refs changed: ${changedRefs.join(", ")}`);
+  const changedInternals = differingKeys(before.internals, after.internals);
+  if (changedInternals.length) parts.push(`.git changed: ${changedInternals.join(", ")}`);
+  return parts.length ? parts.join("; ") : null;
 }
 
 function assertPreparedCheckout(job) {
@@ -1450,11 +1512,28 @@ async function executeJob(root, job) {
     let parsedOutput = null;
     let reviewerInvocationStarted = false;
     let resultApplied = false;
+    let checkoutBaseline = null;
+    const noteCheckoutChanges = () => {
+      if (!checkoutBaseline) return;
+      const baseline = checkoutBaseline;
+      checkoutBaseline = null;
+      const warnings = [];
+      const after = checkoutSnapshot(job.repo_root);
+      if (after.head !== baseline.head) {
+        warnings.push(
+          `HEAD moved during the review (from ${baseline.head ?? "an unborn branch"} to ${after.head ?? "an unborn branch"}); if you did not commit, the reviewer did. The session keeps the pre-review HEAD as its last reviewed commit, so undoing a stray commit keeps continuity.`
+        );
+      }
+      const change = describeCheckoutChange(baseline, after);
+      if (change) warnings.push(`The checkout changed during the review: ${change}.`);
+      if (warnings.length) job.checkout_warning = warnings.join(" ");
+    };
     try {
       if (job.explicit_resume) assertPreparedCheckout(job);
-      const headBefore = headCommit(job.repo_root);
-      const treeBefore = treeSnapshot(job.repo_root);
-      invocation = await invokeReviewer(
+      checkoutBaseline = checkoutSnapshot(job.repo_root);
+      const baselineHead = checkoutBaseline.head;
+      try {
+        invocation = await invokeReviewer(
         root,
         job,
         session,
@@ -1468,7 +1547,10 @@ async function executeJob(root, job) {
           job.conversation_id = conversationId;
           saveJob(root, job);
         }
-      );
+        );
+      } finally {
+        if (reviewerInvocationStarted) noteCheckoutChanges();
+      }
       parsedOutput = parseReviewerOutput(invocation);
       if (backend.conversationStrategy === "assigned" && !parsedOutput.conversationId) {
         throw new Error(`${label()} did not report a conversation ID, so this review cannot be recorded as resumable.`);
@@ -1477,16 +1559,6 @@ async function executeJob(root, job) {
         throw new Error(`${label()} returned unexpected conversation ID ${parsedOutput.conversationId}; expected ${session.conversation_id}.`);
       }
       job.conversation_id = session.conversation_id ?? parsedOutput.conversationId;
-      const warnings = [];
-      const headAfter = headCommit(job.repo_root);
-      if (headAfter !== headBefore) {
-        warnings.push(
-          `HEAD moved during the review (from ${headBefore ?? "an unborn branch"} to ${headAfter ?? "an unborn branch"}); if you did not commit, the reviewer did.`
-        );
-      }
-      const treeChange = describeTreeChange(treeBefore, treeSnapshot(job.repo_root));
-      if (treeChange) warnings.push(`The working tree changed during the review: ${treeChange}.`);
-      if (warnings.length) job.checkout_warning = warnings.join(" ");
       const sequence = nextArtifactSequence(job.task_directory);
       const artifact = path.join(job.task_directory, `${String(sequence).padStart(3, "0")}-${scopeLabel(job.scope)}.md`);
       job.completed_at = new Date().toISOString();
@@ -1500,7 +1572,7 @@ async function executeJob(root, job) {
         session.review_count = Number(session.review_count ?? 0) + 1;
         session.last_scope = job.scope;
         session.conversation_id = session.conversation_id ?? parsedOutput.conversationId;
-        session.last_head = job.explicit_resume ? job.reviewed_tip : headCommit(job.repo_root);
+        session.last_head = job.explicit_resume ? job.reviewed_tip : baselineHead;
         if (job.explicit_resume) session.branch = job.branch;
         if (job.model) session.explicit_model = job.model;
         session.last_applied_job_id = job.id;

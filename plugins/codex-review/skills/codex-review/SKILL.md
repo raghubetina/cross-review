@@ -33,7 +33,8 @@ node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" status --dir /path/to/repo
 
 - Default to `working` scope, `--effort max`, and `--capability full`, which lets Codex run tests, write scratch
   code, install tools, and use your MCP servers while it reviews. Pass `--capability read-only` when the user says
-  the repository is untrusted, or `--capability workspace` when they want writes confined to the scratch directory.
+  the repository is untrusted, or `--capability workspace` when they want Codex unable to commit, stash, or move
+  refs and unable to write outside the checkout and `/tmp`.
 - Codex may only create files under the session's scratch directory, which the runtime creates and names in the
   prompt. The runtime compares HEAD and the working tree after the review and prints a `Warning:` line if either
   changed; relay that warning to the user verbatim.

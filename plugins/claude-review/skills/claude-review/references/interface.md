@@ -68,13 +68,18 @@ The runtime also accepts trailing focus text without `--` when unambiguous.
 ## Reviewer capabilities
 
 `full` gives the reviewer everything the Claude Code agent can normally do, including your MCP servers, hooks, and
-settings. `workspace` behaves like `full`, because Claude Code has no OS sandbox in headless mode. `read-only` restricts Claude to Read, Glob, and Grep.
+settings, project settings of the reviewed repository included. `workspace` behaves like `full`, because Claude
+Code has no OS sandbox in headless mode. `read-only` limits built-in tools to Read, Glob, and Grep, denies anything
+without a pre-existing permission rule (your MCP tools follow those rules), and loads only your user settings, so
+the reviewed repository's own `.claude/settings.json` hooks do not run.
 
 Every session has a scratch directory at `<task directory>/scratch/`, ignored by Git and named in the prompt as the
 only place inside the repository the reviewer may create files; it persists across rounds. The prompt tells the
-reviewer to leave the checkout as found and never commit or push. After the review the runtime compares HEAD and
-the working tree with what it saw before; any difference becomes a `Warning:` line in the result and a warning
-section in the artifact. Explicit `--resume-session` reviews still fail on any change.
+reviewer to leave the checkout as found and never commit or push. After the review, on success or failure, the
+runtime compares HEAD, refs, the dirty set by content, newly ignored paths, and `.git` config and hooks with what
+it saw before; any difference becomes a `Warning:` line naming the paths in the result and a warning section in
+the artifact. If HEAD moved, the session keeps the pre-review HEAD as its last reviewed commit. Explicit
+`--resume-session` reviews still fail on any change.
 
 ## Job controls
 

@@ -57,7 +57,7 @@ export default {
     }
   },
 
-  buildArgs({ job, session, schemaPath, lastMessagePath, scratchDir, capability }) {
+  buildArgs({ job, session, schemaPath, lastMessagePath, capability }) {
     const shared = [
       "--json",
       "--output-schema", schemaPath,
@@ -67,12 +67,9 @@ export default {
       "-c", `sandbox_mode=${JSON.stringify(SANDBOX_MODE[capability])}`,
       "-c", 'approval_policy="never"'
     ];
-    if (capability === "workspace") {
-      shared.push(
-        "-c", "sandbox_workspace_write.network_access=true",
-        "-c", `sandbox_workspace_write.writable_roots=${JSON.stringify([scratchDir])}`
-      );
-    }
+    // workspace-write already covers the checkout, which contains the scratch
+    // directory, and protects .git; only network access needs enabling.
+    if (capability === "workspace") shared.push("-c", "sandbox_workspace_write.network_access=true");
     if (job.model) shared.push("-m", job.model);
     if (job.resumed) return ["exec", "resume", session.conversation_id, "-", ...shared];
     return ["exec", "-", ...shared];

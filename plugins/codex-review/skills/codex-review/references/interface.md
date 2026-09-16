@@ -88,6 +88,16 @@ runtime; kept across rounds once the reviewer is shown the ledger, which is stil
 cited`, then the body, the trigger, quoted evidence, confidence, and recommendation. Results end with numbered next
 steps and residual risk. The ids are recorded in the session ledger inside `session.json`.
 
+## Decisions
+
+A decision is your verdict on a finding, written anywhere in the focus text as `reject F-1a2b3c: reason`,
+`accept F-...`, `defer F-...`, or `reopen F-...`. The runtime records it on the finding before the reviewer starts,
+so it survives a review that fails or a session that retires, and shows every prior finding with its observation,
+disposition, and decision to the reviewer in each later round. A rejected finding can only come back as a
+reopen proposal with new evidence; reviewer output never changes a disposition. A decision on an id the session
+does not know fails before the reviewer runs. When a retired session is replaced, the new session inherits the
+ledger and says so.
+
 ## Job controls
 
 ```text
@@ -110,6 +120,7 @@ another `--wait` call keeps waiting.
 - “Review the architecture/codebase” → `repo --background`
 - “Review it again” → `again --background`
 - “Continue session X over only these fixes” → `--resume-session X range PRIOR_HEAD..HEAD --background`
+- “Reject finding F-1a2b3c, it is intentional” → `again -- reject F-1a2b3c: intentional`
 - “Start over with Codex” → `new`
 - “Forget that review thread” → `reset`
 - “Is the review done?” → `status`, or `result --wait` to block for the result

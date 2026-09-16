@@ -59,7 +59,10 @@ node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" status --dir /path/to/repo
   samples its named-or-detached identity, HEAD, and cleanliness before invoking Codex and before applying the result;
   a transient change restored between samples cannot be detected. A background review may overlap work in another
   checkout.
-- Forward later user decisions as focus text so Codex receives them in its thread.
+- Forward later user decisions as focus text so Codex receives them in its thread. When the user decides about a
+  specific finding, write it as `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`; the
+  runtime records the disposition before Codex runs and shows all prior findings and decisions to Codex in every
+  later round, including after a retired session.
 - Run reviews with `--background`. Claude Code's Bash tool has a hard per-call time limit, and a max-effort Codex
   review often runs longer than that; the background worker is detached from the shell and survives the end of the
   call and of the session. Use `--wait` on a review only when the user explicitly asks to block and the change is tiny.

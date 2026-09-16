@@ -64,10 +64,10 @@ const structured = {
   summary: "One material issue found.",
   findings: [
     {
-      id: null,
-      observation: "new",
+      id: process.env.FAKE_CLAUDE_REPORT_ID || null,
+      observation: process.env.FAKE_CLAUDE_OBSERVATION || "new",
       severity: "high",
-      title: "Example defect",
+      title: process.env.FAKE_CLAUDE_TITLE || "Example defect",
       body: "The fake reviewer found a deterministic defect.",
       file: "example.txt",
       line_start: 1,

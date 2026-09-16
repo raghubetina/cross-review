@@ -222,7 +222,7 @@ confidence, groups by id, flags apparent duplicates without deleting them,
 normalizes `line_end` below `line_start`, and shows id, observation,
 disposition, and pre-existing flags.
 
-### 6.3 Decisions ledger (both, medium)
+### 6.3 Decisions ledger (both, medium). Done 2026-09-16.
 
 The ledger lives inside `session.json` under `ledger`, so reviewer
 observations are written in the same atomic replace as
@@ -371,8 +371,11 @@ claude-review.
 - Phase 3, rubric and schema v2. Done 2026-09-16: prompt rubric with
   attribution in NOTICE, schema v2, runtime-assigned ids recorded in a session
   ledger of observations, severity-sorted renderer with next steps.
-- Phase 4, ledger. Storage, decision parsing, prompt injection, retirement
-  inheritance. One day.
+- Phase 4, ledger. Done 2026-09-16: decision syntax parsed from focus text
+  and written before the reviewer runs, prior findings and decisions injected
+  into every later prompt, observations recorded without touching
+  dispositions, ledger inherited after retirement, id-less entries
+  consolidated by file and title.
 - Phase 5, context and secrets. Size-aware collection, caps, filter. Half a
   day.
 - Phase 6, host double-check and docs. Quarter day.

@@ -57,7 +57,10 @@ node "$SKILL_DIR/scripts/claude-review.mjs" result --dir /path/to/repo
   samples its named-or-detached identity, HEAD, and cleanliness before invoking Claude and before applying the result;
   a transient change restored between samples cannot be detected. A background review may overlap work in another
   checkout.
-- Forward later user decisions as focus text so Claude receives them in its transcript.
+- Forward later user decisions as focus text so Claude receives them in its transcript. When the user decides
+  about a specific finding, write it as `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`;
+  the runtime records the disposition before Claude runs and shows all prior findings and decisions to Claude in
+  every later round, including after a retired session.
 - Choose foreground or background execution from the workflow. Prefer foreground when the result gates the current
   action; prefer background when useful independent work can continue or the review is likely to take a long time;
   ask the user when neither choice is clearly better. Honor an explicit user preference.

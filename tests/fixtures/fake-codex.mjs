@@ -37,6 +37,10 @@ if (logPath) {
   })}\n`, "utf8");
 }
 
+// Real Codex reports the thread before doing any work, so the runtime can record it early.
+process.stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: threadId })}\n`);
+process.stdout.write(`${JSON.stringify({ type: "turn.started" })}\n`);
+
 const delay = Number(process.env.FAKE_CODEX_DELAY_MS || 0);
 if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
 
@@ -64,8 +68,6 @@ const structured = {
 };
 const text = JSON.stringify(structured);
 const events = [
-  { type: "thread.started", thread_id: threadId },
-  { type: "turn.started" },
   { type: "item.completed", item: { id: "item_0", type: "agent_message", text } },
   { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 30, reasoning_output_tokens: 5 } }
 ];

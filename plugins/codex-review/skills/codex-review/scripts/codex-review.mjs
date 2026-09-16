@@ -891,6 +891,7 @@ async function prepareJob(parsed, repoRoot, root) {
       reviewed_tip: reviewedTip,
       task_directory: entry.directory,
       session_id: entry.session.session_id,
+      thread_id: entry.session.thread_id ?? null,
       explicit_resume: explicitlySelected,
       scope,
       focus: parsed.focus,
@@ -1108,7 +1109,7 @@ function codexInvocationArgs(job, session, schemaPath, lastMessagePath) {
   return ["exec", "-", "-s", "read-only", ...shared];
 }
 
-async function invokeCodex(root, job, session, onSpawn = () => {}) {
+async function invokeCodex(root, job, session, onSpawn = () => {}, onThread = () => {}) {
   const binary = codexBinary();
   const codexVersion = checkCodexVersion(binary);
   const schemaPath = path.join(root, "review-schema.json");
@@ -1131,6 +1132,30 @@ async function invokeCodex(root, job, session, onSpawn = () => {}) {
     let oversized = false;
     let settled = false;
     let timer = null;
+    let scanned = 0;
+    let threadReported = false;
+    const reportThreadEarly = () => {
+      let newline;
+      while (!threadReported && (newline = stdout.indexOf("\n", scanned)) >= 0) {
+        const line = stdout.slice(scanned, newline).trim();
+        scanned = newline + 1;
+        if (!line.startsWith("{")) continue;
+        let event;
+        try {
+          event = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (event?.type === "thread.started" && typeof event.thread_id === "string") {
+          threadReported = true;
+          try {
+            onThread(event.thread_id);
+          } catch {
+            // Early thread metadata is best-effort; the applied result records it authoritatively.
+          }
+        }
+      }
+    };
     const clearInvocation = () => {
       if (timer) clearTimeout(timer);
       if (activeCodexChild === child) activeCodexChild = null;
@@ -1149,6 +1174,7 @@ async function invokeCodex(root, job, session, onSpawn = () => {}) {
     };
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
+      if (!threadReported) reportThreadEarly();
       if (Buffer.byteLength(stdout) > MAX_OUTPUT_BYTES) {
         oversized = true;
         child.kill("SIGTERM");
@@ -1366,11 +1392,21 @@ async function executeJob(root, job) {
     let resultApplied = false;
     try {
       if (job.explicit_resume) assertPreparedCheckout(job);
-      invocation = await invokeCodex(root, job, session, () => {
-        codexInvocationStarted = true;
-        job.codex_started_at = new Date().toISOString();
-        saveJob(root, job);
-      });
+      invocation = await invokeCodex(
+        root,
+        job,
+        session,
+        () => {
+          codexInvocationStarted = true;
+          job.codex_started_at = new Date().toISOString();
+          saveJob(root, job);
+        },
+        (threadId) => {
+          if (job.thread_id) return;
+          job.thread_id = threadId;
+          saveJob(root, job);
+        }
+      );
       parsedOutput = parseCodexOutput(invocation.stdout, invocation.lastMessage);
       if (!parsedOutput.threadId) {
         throw new Error("Codex did not report a thread ID, so this review cannot be recorded as resumable.");

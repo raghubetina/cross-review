@@ -1275,6 +1275,41 @@ test("a resumed session without a recorded Codex thread fails before invoking Co
   assert.equal(sessions(repo)[0].session.active, true);
 });
 
+test("the thread ID is visible while a review is still running", async () => {
+  const repo = createRepo();
+  fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+  const logPath = fakeLogPath(repo);
+  const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+    cwd: repo,
+    env: reviewEnv(logPath, { FAKE_CODEX_DELAY_MS: "2500" })
+  });
+  const id = started.stdout.match(/Codex review job: (\S+)/)?.[1];
+  assert.ok(id);
+  let status = "";
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    status = command(process.execPath, [RUNTIME, "status", id, "--dir", repo]).stdout;
+    if (/Thread ID: [0-9a-f-]{36}/.test(status)) break;
+  }
+  assert.match(status, /Status: running/);
+  assert.match(status, /Thread ID: [0-9a-f-]{36}/);
+  const finished = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
+    cwd: repo,
+    timeout: 30_000
+  }).stdout;
+  assert.match(finished, /Status: completed/);
+  const threadId = calls(logPath)[0].threadId;
+  assert.match(finished, new RegExp(`Thread ID: ${threadId}`));
+
+  const again = command(process.execPath, [RUNTIME, "--dir", repo, "again", "--background"], {
+    cwd: repo,
+    env: reviewEnv(logPath, { FAKE_CODEX_DELAY_MS: "1500" })
+  }).stdout;
+  assert.match(again, new RegExp(`Thread ID: ${threadId}`));
+  const againId = again.match(/Codex review job: (\S+)/)?.[1];
+  command(process.execPath, [RUNTIME, "result", againId, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 });
+});
+
 test("Codex failures produce a failed artifact and actionable status", () => {
   const repo = createRepo();
   fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");

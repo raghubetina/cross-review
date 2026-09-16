@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Persistent, scoped Codex reviews from Claude Code.",
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "plugins": [
     {
       "name": "codex-review",
       "description": "Review working changes, branches, commits, ranges, or repositories with Codex from Claude Code, keeping one persistent Codex thread per review session.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": {
         "name": "Raghu Betina"
       },

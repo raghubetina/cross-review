@@ -1,7 +1,7 @@
 # Plan: unify claude-review and codex-review, then improve both
 
-Status: revision 3, 2026-09-16, after two Codex review rounds (see section
-10). Nothing here is implemented yet except where marked "(done in
+Status: revision 4, 2026-09-16, after two Codex review rounds (see section
+10) and the author's decisions (section 9). Ready to execute. Nothing here is implemented yet except where marked "(done in
 codex-review)".
 
 ## 1. Goals
@@ -17,7 +17,8 @@ codex-review)".
    size-aware context, a host-side double-check step, a wider secret filter,
    delimited untrusted context.
 4. The user-facing CLI and the session model stay as they are. Existing
-   `tmp/claude_reviews/` and `tmp/codex_reviews/` state keeps working.
+   `tmp/claude_reviews/` and `tmp/codex_reviews/` state is discarded; there
+   is no compatibility layer.
 
 Non-goals: stop-gate hooks, auto-review nudges after edits, an MCP bridge, the
 Codex app-server native reviewer, multi-model debate protocols.
@@ -43,13 +44,10 @@ Verified on this machine unless noted.
   exercised end to end: the reviewer wrote a file into the extra root.
   Reasoning effort accepts minimal, low, medium, high, xhigh, max, ultra.
 - On Codex 0.153.4, `-c mcp_servers={}` does not disable MCP servers, because
-  `-c` merges tables. A read-only review could still call the `node_repl`
-  server. Per-server `-c mcp_servers.<name>.enabled=false` overrides disable
-  servers with bare names (the same reviewer then reports that no such tool
-  exists) but fail configuration loading for names containing dots, quoted
-  or not. A profile-v2 layer file (`$CODEX_HOME/<profile>.config.toml`,
-  passed with `-p <profile>`) using quoted table keys disables both kinds;
-  verified in an isolated `CODEX_HOME`.
+  `-c` merges tables. Per-server `-c mcp_servers.<name>.enabled=false` works
+  for bare names only; a profile-v2 layer file with quoted table keys works
+  for any name. The plan no longer disables MCP servers; this is recorded so
+  the no-op is not reintroduced.
 - Claude Code 2.1.273: `--permission-mode` accepts acceptEdits, auto,
   bypassPermissions, manual, and more; `--dangerously-skip-permissions`,
   `--allowedTools`, `--tools`, `--setting-sources`, `--strict-mcp-config`
@@ -63,12 +61,12 @@ Verified on this machine unless noted.
 
 ## 3. Repository layout
 
-Rename the existing `raghubetina/codex-review` repository to a neutral name
-(working title `cross-review`; alternatives: `agent-review`, `second-opinion`)
+Rename the existing `raghubetina/codex-review` repository to `cross-review`
 so GitHub redirects keep the current install path alive until both hosts are
 re-pointed. Import claude-review by copying its files in one commit whose
-message cites the source repository and commit; archive `claude-review` with a
-README pointer once the Codex marketplace path from the new repo is verified.
+message cites the source repository and commit. Once the Codex marketplace
+path from the new repo is verified, add a README pointer to `claude-review`
+and archive it read-only; its six original commits stay there as history.
 
 ```text
 cross-review/
@@ -118,8 +116,7 @@ plugin install needs no build step.
   the plugin choose the session id (`--session-id`), so the plugin session id
   and the Claude session id can stay equal. Codex assigns the thread id, so the
   runtime records `conversation_id` after the first turn. The session file
-  gains `conversation_id`; for legacy claude-review sessions it defaults to
-  `session_id`.
+  gains `conversation_id`.
 - `parseOutput` returns `{ structured, rawResult, conversationId, usage,
   degraded }`. The runtime, not the backend, validates the structure, computes
   finding ids, sorts, and renders.
@@ -139,22 +136,13 @@ recorded per job and shown in the artifact header.
 | workspace | `sandbox_mode="workspace-write"`, `network_access=true`, `writable_roots=[scratch]` | same as full (Claude Code has no OS sandbox in `-p` mode; revisit if `--settings sandbox` proves usable) |
 | read-only | `sandbox_mode="read-only"`, `approval_policy="never"` (today's behavior) | `--tools Read,Glob,Grep --permission-mode dontAsk` (today's behavior) |
 
-MCP servers from the user's own Codex or Claude config are inherited in
-`full` and `workspace` modes, so a Playwright MCP server or a docs server is
-available to the reviewer. `read-only` mode disables them by default, because
-neither host applies a read-only policy to MCP tools. `--mcp` and `--no-mcp`
-override the per-mode default.
-
-Mechanism, verified on Codex 0.153.4: the runtime runs `codex mcp list
---json`, takes every server with `enabled: true`, writes
-`$CODEX_HOME/codex-review-no-mcp.config.toml` containing one
-`[mcp_servers."<name>"]` table with `enabled = false` per server (quoted keys,
-so names with dots work), and passes `-p codex-review-no-mcp`. Dotted `-c`
-overrides are not used because they cannot address names containing dots.
-The file is rewritten on every such run, documented in the README, and if
-discovery fails or the file cannot be written the review does not start. For
-Claude the flag is `--strict-mcp-config`. The current codex-review passed the
-no-op `mcp_servers={}` and documented MCP as disabled; that was removed and
+The reviewer is the same agent the user already trusts to write code, so it
+inherits the user's full Codex or Claude configuration in every mode: MCP
+servers (a Playwright server, a Render logs server, a docs server), hooks,
+settings, and skills. There is no MCP switch. For the Claude backend this
+means dropping `--strict-mcp-config` and `--setting-sources user` so the
+review runs like a normal Claude Code session. The current codex-review passed
+a no-op `mcp_servers={}` and documented MCP as disabled; that was removed and
 the docs corrected on 2026-09-16.
 
 Guardrails that apply in every mode:
@@ -344,19 +332,14 @@ review runs, and a review killed mid-flight leaves a handle that `codex
 resume` or `claude --resume` can open. (Done in codex-review for the Codex
 side on 2026-09-16.)
 
-## 7. Compatibility and migration
+## 7. Compatibility
 
-- `STATE_VERSION` becomes 2. Session files are upgraded on read with a
-  backend-specific rule: Codex sessions copy their existing `thread_id` into
-  `conversation_id`, Claude sessions copy `session_id`. A Codex session with
-  neither keeps refusing to resume, as today. A missing ledger starts empty.
-  Migration is tested by upgrading a legacy file and then asserting the
-  resume arguments the backend builds.
-- Job files gain `capability`, `tree_warning`, and `conversation_id`. Old
-  jobs render unchanged.
-- Old artifacts are never rewritten.
-- CLI stays backward compatible; new flags are `--capability`, `--no-mcp`,
-  `--wait-minutes`. `--max-budget-usd` remains on the Claude backend.
+None is kept. `STATE_VERSION` becomes 2 and the runtime ignores session and
+job files with any other version, printing one line that tells the user to
+delete the old `tmp/claude_reviews/` or `tmp/codex_reviews/` directory. Job
+files gain `capability`, `tree_warning`, and `conversation_id`. New flags are
+`--capability` and `--wait-minutes`; `--max-budget-usd` stays on the Claude
+backend.
 
 ## 8. Sequencing
 
@@ -364,8 +347,9 @@ Each phase ends with green tests for both backends, one squashed commit, a
 Codex review of the diff through codex-review, and a Claude review through
 claude-review.
 
-- Phase 0, repo. Rename, import claude-review, both marketplaces from one
-  repo, both installs verified from GitHub. Half a day.
+- Phase 0, repo. Rename to cross-review, import claude-review in one cited
+  commit, both marketplaces from one repo, both installs verified from
+  GitHub, then archive claude-review with a pointer. Half a day.
 - Phase 1, shared core. Extract `src/runtime.mjs` and the two backends from
   the two runtimes, copy step, parametrized tests. The 228-line diff is the
   worklist. One day.
@@ -380,18 +364,24 @@ claude-review.
   day.
 - Phase 6, host double-check and docs. Quarter day.
 
-## 9. Open decisions
+## 9. Decisions
 
-1. Repository name.
-2. Default capability `full` accepted as the risk posture for the user's own
-   repositories.
-3. Keep `critical/high/medium/low` or switch the schema to P0 to P3.
-4. Whether the Claude backend keeps `--setting-sources user` in `full` mode.
-5. Whether to preserve claude-review's git history with a subtree import or
-   cite it in one commit.
-6. Whether `read-only` mode disables MCP servers by default, as the review
-   recommends, given that neither host applies a read-only policy to MCP
-   tools.
+Decided by the author on 2026-09-16:
+
+- Reviewers get `full` capability by default and inherit MCP servers, hooks,
+  settings, and skills in every mode; the Claude backend runs like a normal
+  Claude Code session.
+- No compatibility with version 1 state.
+
+- Repository name: `cross-review`; the plugins inside keep their names.
+- All three capability modes stay: `full` (default), `workspace`,
+  `read-only`.
+- Severity vocabulary stays `critical/high/medium/low`, with Codex's P0 to
+  P3 definitions mapped onto it in the prompt.
+- claude-review is imported by copying its files in one commit that cites
+  the source repository and commit; no subtree import.
+- After the move, claude-review gets a README pointer and is archived
+  read-only.
 
 ## 10. Review log
 
@@ -400,10 +390,12 @@ Revision 1 was reviewed by Codex (max effort) through codex-review itself, job
 Findings and how revision 2 answers them:
 
 1. High. `mcp_servers={}` does not disable MCP servers on Codex 0.153.4, and
-   inherited MCP tools escape both hosts' read-only controls. Section 5
-   rewritten; see also the fix to the current codex-review noted there.
+   inherited MCP tools escape both hosts' read-only controls. The no-op was
+   removed from the current plugin; the author then decided that reviewers
+   inherit MCP servers in every mode, so section 5 no longer disables them.
 2. High. Defaulting `conversation_id` to `session_id` would break legacy Codex
-   sessions that store `thread_id`. Section 7 now migrates per backend.
+   sessions that store `thread_id`. Moot: the author dropped compatibility
+   with version 1 state, and section 7 now says so.
 3. Medium. Hashing file plus title is not a stable identity. Section 6.2 now
    assigns ids once and has the reviewer reference them.
 4. Medium. A separate ledger file has a crash window against the applied
@@ -429,8 +421,8 @@ five points, answered in revision 3:
    inconsistent. Section 6.2 now has one `observation` enum; dispositions are
    ledger-only.
 4. Medium. Dotted MCP server names break `mcp_servers.<name>.enabled=false`
-   overrides. Section 5 now uses a profile-v2 layer file with quoted keys and
-   fails closed.
+   overrides. Moot once MCP servers are inherited everywhere; the working
+   mechanism is recorded in section 2 for reference.
 5. Medium. Claude has no early event under `--output-format json`. Section
    6.8 now records chosen ids at preparation and limits the event hook to
    Codex.

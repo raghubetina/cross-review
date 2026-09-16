@@ -1,0 +1,22 @@
+{
+  "name": "codex-review",
+  "owner": {
+    "name": "Raghu Betina",
+    "url": "https://github.com/raghubetina"
+  },
+  "metadata": {
+    "description": "Persistent, scoped Codex reviews from Claude Code.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "codex-review",
+      "description": "Review working changes, branches, commits, ranges, or repositories with Codex from Claude Code, keeping one persistent Codex thread per review session.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Raghu Betina"
+      },
+      "source": "./plugins/codex-review"
+    }
+  ]
+}

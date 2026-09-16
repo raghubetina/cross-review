@@ -1,15 +1,15 @@
 # Plan: unify claude-review and codex-review, then improve both
 
-Status: revision 4, 2026-09-16, after two Codex review rounds (see section
-10) and the author's decisions (section 9). Phases 0 and 1 were completed the
-same day; the rest is ready to execute. Nothing here is implemented yet except where marked "(done in
+Status: revision 5, 2026-09-16. Phases 0 and 1 are done; sections 3, 4, and 7
+describe shipped code. Phases 2 to 6 remain and are ready to execute. Section
+10 logs every review round so far. Nothing here is implemented yet except where marked "(done in
 codex-review)".
 
 ## 1. Goals
 
 1. One repository ships both plugins: claude-review (a Codex plugin that asks
    Claude Code to review) and codex-review (a Claude Code plugin that asks Codex
-   to review), with one shared runtime and a thin backend per reviewer.
+   to review), with one shared runtime and a thin backend per reviewer. Done.
 2. Reviewers get full capabilities by default: run tests, write scratch code,
    install tools, download libraries, drive browsers. The runtime protects the
    reviewed checkout with rules and verification, not by removing tools.
@@ -97,34 +97,40 @@ plugin install needs no build step.
 
 ## 4. Backend contract
 
+As shipped in `src/backends/*.mjs`, validated by `validateBackend()` when the
+runtime starts:
+
 ```js
 {
-  name: "codex",
-  reviewerLabel: "Codex",
-  artifactDirectory: "tmp/codex_reviews",
-  binaryEnv: "CODEX_REVIEW_CODEX_BIN",
-  minVersion: [0, 136, 0],
-  checkVersion(binary),
+  name: "codex", reviewerLabel: "Codex", artifactDirectory: "tmp/codex_reviews",
+  binaryEnv: "CODEX_REVIEW_CODEX_BIN", defaultBinary: "codex",
+  versionLabel: "Codex CLI", minVersion: [0, 136, 0], installHint: "...",
+  effortLevels: [...], defaultEffort: "max",
   conversationStrategy: "assigned" | "chosen",
-  buildArgs({ job, session, schemaPath, lastMessagePath, scratchDir, capability, mcp }),
-  parseOutput({ stdout, lastMessage }),
-  optionSchema: { "max-budget-usd": ... },
-  hostGuidance: { backgroundFirst: true, waitCallCeilingMinutes: 5 }
+  conversationLabel: "Codex thread ID", resumeHint: (id) => `codex resume ${id}`,
+  extraOptions: { "--max-budget-usd": { key: "max_budget_usd", usage: "..." } },
+  usesLastMessageFile: true,
+  prompt: { tools, repoScope, truncation, conduct },
+  buildArgs({ job, session, schema, schemaPath, lastMessagePath }) -> argv,
+  earlyConversationId(line) -> id | null,        // optional
+  parseOutput({ stdout, lastMessage }) -> { candidate, rawResult, conversationId, usage, models },
+  artifactLines({ job, session, parsedOutput, invocation }) -> string[]
 }
 ```
 
-- `conversationStrategy` captures the one structural difference. Claude lets
-  the plugin choose the session id (`--session-id`), so the plugin session id
-  and the Claude session id can stay equal. Codex assigns the thread id, so the
-  runtime records `conversation_id` after the first turn. The session file
-  gains `conversation_id`.
-- `parseOutput` returns `{ structured, rawResult, conversationId, usage,
-  degraded }`. The runtime, not the backend, validates the structure, computes
-  finding ids, sorts, and renders.
-- Backend-specific options (`--max-budget-usd` for Claude) live in
-  `optionSchema`; the other backend rejects them with a clear message.
-- The prompt is shared. Backend text differs only in the tool sentence and the
-  scratch-directory sentence.
+- `conversationStrategy` captures the one structural difference. `chosen`
+  (Claude): the runtime generates a separate `conversation_id` UUID when it
+  creates the session and passes it as `--session-id`, so the plugin session
+  id never doubles as a reviewer handle. `assigned` (Codex): the id arrives in
+  the first `thread.started` event and is recorded on the job immediately and
+  on the session when the result is applied.
+- The runtime, not the backend, validates the structured result, and will own
+  finding ids, sorting, and rendering (phase 3).
+- Extra options are numeric and positive for now; a backend that needs another
+  kind extends the shared parser rather than working around it.
+- The prompt is shared. Backend text differs only in the four `prompt.*`
+  sentences.
+- Phase 2 will add the capability mode and scratch directory to `buildArgs`.
 
 ## 5. Reviewer capabilities
 
@@ -348,12 +354,12 @@ Each phase ends with green tests for both backends, one squashed commit, a
 Codex review of the diff through codex-review, and a Claude review through
 claude-review.
 
-- Phase 0, repo. Rename to cross-review, import claude-review in one cited
-  commit, both marketplaces from one repo, both installs verified from
-  GitHub, then archive claude-review with a pointer. Half a day.
-- Phase 1, shared core. Extract `src/runtime.mjs` and the two backends from
-  the two runtimes, copy step, parametrized tests. The 228-line diff is the
-  worklist. One day.
+- Phase 0, repo. Done 2026-09-16: renamed to cross-review, claude-review
+  imported in one cited commit, both marketplaces served from one repo, both
+  installs verified from GitHub, claude-review archived with a pointer.
+- Phase 1, shared core. Done 2026-09-16: `src/runtime.mjs` plus the two
+  backends, copy step with a drift test, one suite parametrized over both
+  backends, reviewed by both reviewers (section 10).
 - Phase 2, capabilities. Modes, scratch directory, checkout rules, HEAD and
   tree verification, MCP inheritance, docs. Half a day plus live runs in each
   mode against both CLIs.
@@ -373,6 +379,7 @@ Decided by the author on 2026-09-16:
   settings, and skills in every mode; the Claude backend runs like a normal
   Claude Code session.
 - No compatibility with version 1 state.
+- Claude's `conversation_id` is a separate UUID from the plugin session id.
 
 - Repository name: `cross-review`; the plugins inside keep their names.
 - All three capability modes stay: `full` (default), `workspace`,
@@ -427,3 +434,13 @@ five points, answered in revision 3:
 5. Medium. Claude has no early event under `--output-format json`. Section
    6.8 now records chosen ids at preparation and limits the event hook to
    Codex.
+
+The Phase 1 commit was reviewed by both plugins on themselves. Codex (job
+`review-mu424muv-7ab9d7`) reproduced one regression: the extra-option lookup
+used plain property access, so a ref or focus word such as `constructor`
+matched an inherited property. Fixed in the next commit with a parametrized
+regression test. Claude (job `review-mu424oo8-898815`) found the same bug and
+added four low findings, all applied: validate the backend contract at
+startup, print the resume hint only once the reviewer has started, cover the
+retirement-time conversation id change and `--max-budget-usd` end to end, and
+bring this document back in line with the shipped contract.

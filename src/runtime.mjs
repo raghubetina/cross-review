@@ -18,6 +18,35 @@ function label() {
   return backend.reviewerLabel;
 }
 
+export function validateBackend(candidate) {
+  const required = [
+    "name", "reviewerLabel", "artifactDirectory", "binaryEnv", "defaultBinary", "versionLabel", "minVersion",
+    "installHint", "effortLevels", "defaultEffort", "conversationStrategy", "conversationLabel", "resumeHint",
+    "buildArgs", "parseOutput", "prompt"
+  ];
+  const missing = required.filter((key) => candidate?.[key] === undefined);
+  if (missing.length) {
+    throw new Error(`Backend ${candidate?.name ?? "(unnamed)"} is missing: ${missing.join(", ")}.`);
+  }
+  if (!["chosen", "assigned"].includes(candidate.conversationStrategy)) {
+    throw new Error(`Backend ${candidate.name} has an unknown conversationStrategy: ${candidate.conversationStrategy}.`);
+  }
+  if (!candidate.effortLevels.includes(candidate.defaultEffort)) {
+    throw new Error(`Backend ${candidate.name} default effort ${candidate.defaultEffort} is not one of its effort levels.`);
+  }
+  for (const key of ["tools", "repoScope", "truncation", "conduct"]) {
+    if (typeof candidate.prompt[key] !== "string" || !candidate.prompt[key].trim()) {
+      throw new Error(`Backend ${candidate.name} prompt.${key} must be a non-empty string.`);
+    }
+  }
+  for (const [flag, option] of Object.entries(candidate.extraOptions ?? {})) {
+    if (!flag.startsWith("--") || typeof option?.key !== "string" || typeof option?.usage !== "string") {
+      throw new Error(`Backend ${candidate.name} extra option ${flag} needs a key and usage text.`);
+    }
+  }
+  return candidate;
+}
+
 function artifactRelative() {
   return backend.artifactDirectory;
 }
@@ -1508,7 +1537,9 @@ function renderJob(root, job, includeResult = false) {
     `Session ID: ${jobSessionId(root, job) ?? "unknown"}`,
     `${backend.conversationLabel}: ${job.conversation_id ?? "unknown"}`
   ];
-  if (job.conversation_id) lines.push(`Resume interactively: ${backend.resumeHint(job.conversation_id)}`);
+  if (job.conversation_id && job.reviewer_started_at) {
+    lines.push(`Resume interactively: ${backend.resumeHint(job.conversation_id)}`);
+  }
   if (job.started_after_retired_session_id) {
     lines.push(
       `Notice: Previous session ${job.started_after_retired_session_id} was retired; this review started a new isolated session.`
@@ -1622,7 +1653,7 @@ function cancelJob(root, selected) {
 }
 
 export async function main(activeBackend, scriptPath, argv = process.argv.slice(2)) {
-  backend = activeBackend;
+  backend = validateBackend(activeBackend);
   SCRIPT_PATH = scriptPath;
   if (argv[0] === "__run-job") {
     const id = argv[1];

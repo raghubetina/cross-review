@@ -13,7 +13,8 @@ import {
   parseArguments,
   parseReviewerOutput,
   resolveRepository,
-  resolveScope
+  resolveScope,
+  validateBackend
 } from "../src/runtime.mjs";
 
 const TEST_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -83,6 +84,7 @@ const BACKENDS = [
     skillDirectory: path.resolve(TEST_ROOT, "../plugins/claude-review/skills/claude-review"),
     skillPatterns: [
       /\$SKILL_DIR\/scripts\/claude-review\.mjs/,
+      /Choose foreground or background execution from the workflow/,
       /Do not impose an agent-side timeout/
     ]
   }
@@ -162,6 +164,15 @@ test("positional words that match inherited object properties are not options", 
     assert.equal(parseArguments(["repo", "focus", "on", "constructor", "behavior"], backend).focus, "focus on constructor behavior");
     assert.equal(parseArguments(["branch", "toString"], backend).scopeArgument, "toString");
   }
+});
+
+test("the backend contract is validated at startup", () => {
+  assert.equal(validateBackend(codexBackend), codexBackend);
+  assert.equal(validateBackend(claudeBackend), claudeBackend);
+  assert.throws(() => validateBackend({ ...codexBackend, conversationStrategy: "nope" }), /unknown conversationStrategy/);
+  assert.throws(() => validateBackend({ ...claudeBackend, defaultEffort: "ultra" }), /not one of its effort levels/);
+  assert.throws(() => validateBackend({ ...codexBackend, prompt: { ...codexBackend.prompt, conduct: "" } }), /prompt\.conduct/);
+  assert.throws(() => validateBackend({ ...claudeBackend, buildArgs: undefined }), /missing: buildArgs/);
 });
 
 test("backends own their effort levels and extra options", () => {
@@ -1042,9 +1053,11 @@ function defineSuite(B) {
     const invocations = calls(first.logPath);
     assert.equal(invocations.length, 2);
     assert.ok(!B.isResume(invocations[1].args));
+    assert.notEqual(invocations[1].conversationId, invocations[0].conversationId);
     const taskEntries = sessions(repo);
     assert.equal(taskEntries.length, 2);
     assert.equal(taskEntries[1].session.active, true);
+    assert.notEqual(taskEntries[1].session.conversation_id, taskEntries[0].session.conversation_id);
   });
 
   test(`[${B.name}] an explicit resume refuses a stale session retired during preparation`, () => {
@@ -1445,6 +1458,31 @@ function defineSuite(B) {
     assert.match(again.result.stdout, new RegExp(`Session ID: ${current.session.session_id}`));
     assert.doesNotMatch(again.result.stdout, /legacy-session/);
     assert.equal(calls(first.logPath).length, 2);
+  });
+
+  if (B.name === "claude") {
+    test(`[${B.name}] --max-budget-usd reaches the reviewer invocation`, () => {
+      const repo = createRepo();
+      fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+      const { logPath } = runReview(repo, ["working", "--max-budget-usd", "2.5"]);
+      const args = calls(logPath)[0].args;
+      assert.equal(args[args.indexOf("--max-budget-usd") + 1], "2.5");
+      assert.equal(jobs(repo)[0].job.backend_options.max_budget_usd, 2.5);
+    });
+  }
+
+  test(`[${B.name}] the resume hint appears only once the reviewer has started`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+      cwd: repo,
+      env: reviewEnv(fakeLogPath(repo), { [B.delayEnv]: "1500" })
+    }).stdout;
+    assert.doesNotMatch(started, /Resume interactively/);
+    const id = started.match(B.jobIdPattern)?.[1];
+    const finished = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
+    assert.match(finished, /Status: completed/);
+    assert.match(finished, /Resume interactively: /);
   });
 
   test(`[${B.name}] reviewer failures produce a failed artifact and actionable status`, () => {

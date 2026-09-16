@@ -83,8 +83,8 @@ the artifact. If HEAD moved, the session keeps the pre-review HEAD as its last r
 
 ## Result format
 
-Findings are sorted by severity then confidence. Each shows its id (`F-` plus six hex characters, stable for the
-session), severity, title, location, flags such as `pre-existing`, `persisting`, `duplicate id`, or `no location
+Findings are sorted by severity then confidence. Each shows its id (`F-` plus six hex characters, assigned by the
+runtime; kept across rounds once the reviewer is shown the ledger, which is still to come), severity, title, location, flags such as `pre-existing`, `persisting`, `duplicate id`, or `no location
 cited`, then the body, the trigger, quoted evidence, confidence, and recommendation. Results end with numbered next
 steps and residual risk. The ids are recorded in the session ledger inside `session.json`.
 

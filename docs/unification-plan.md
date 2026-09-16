@@ -271,7 +271,9 @@ session, which `createTask` seeds from the accepted ledger.
 - Other focus text is stored as a session note.
 - Every re-review prompt gets a compact "Prior findings and decisions" table
   from the ledger, whether or not the reviewer's conversation resumed. This is
-  what makes continuity survive retirement.
+  what makes continuity survive retirement. Before injecting, entries recorded
+  by rounds that could not reference ids (phase 3 sessions) are deduplicated
+  by file and normalized title so one defect is shown once.
 - `again` after retirement therefore works: new conversation, inherited ledger,
   and the output says so.
 
@@ -433,6 +435,21 @@ the moved HEAD as last reviewed severed continuity once the stray commit was
 undone, that mtime fingerprints misreported identical rewrites, that the
 comparison ignored refs, ignored paths, and `.git` internals, and that section
 4 had drifted. All applied in the follow-up commit.
+
+The Phase 3 commit was the first review either plugin ran under the new
+prompt and schema, and the rendered results came back with ids, triggers,
+quoted evidence, and next steps as designed. Claude (job
+`review-mu4brmw6-2f63c9`) found that the injection guard declared the
+user's own focus untrusted while the next line said to weight it heavily,
+that rules 1 and 4 excluded exactly the persisting and fixed findings a
+resumed round must report, that a quoted markdown fence inside evidence
+closed the rendered block early, that a file-only citation was flagged as
+"no location cited", and that the docs promised session-stable ids before
+phase 4 can deliver them; it also noted that rule 3 could suppress security
+findings in lax codebases. Codex (job `review-mu4brkmz-73a12c`) reproduced
+the fence collision independently. All applied in the follow-up commit,
+including a security exception in rule 3, a resumed-round carve-out, and
+neutralizing a literal closing tag inside repository content.
 
 Revision 2 was reviewed on the same Codex thread (`again`, job
 `review-mu3z9uiz-58cdc5`). It confirmed 2, 3, 4, 7, and 8 resolved and raised

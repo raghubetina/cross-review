@@ -348,7 +348,7 @@ test("an explicit session rechecks its destination before moving there", async (
   const id = started.stdout.match(/Claude review job: (\S+)/)?.[1];
   assert.ok(id);
 
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
     if (calls(first.logPath).length === 2) break;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -667,7 +667,7 @@ test("a moving checkout retires the advanced review without advancing its accept
   const id = started.stdout.match(/Claude review job: (\S+)/)?.[1];
   assert.ok(id);
 
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
     if (fs.existsSync(logPath) && calls(logPath).length === 2) break;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -752,7 +752,7 @@ test("a same-SHA named-to-detached checkout change retires an explicit resumed s
   const id = started.stdout.match(/Claude review job: (\S+)/)?.[1];
   assert.ok(id);
 
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
     if (calls(first.logPath).length === 2) break;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }

@@ -1,12 +1,12 @@
 {
-  "name": "codex-review",
+  "name": "cross-review",
   "owner": {
     "name": "Raghu Betina",
     "url": "https://github.com/raghubetina"
   },
   "metadata": {
-    "description": "Persistent, scoped Codex reviews from Claude Code.",
-    "version": "0.1.1"
+    "description": "Cross-model code review: Codex reviews from Claude Code, Claude reviews from Codex, with persistent reviewer sessions.",
+    "version": "0.2.0"
   },
   "plugins": [
     {

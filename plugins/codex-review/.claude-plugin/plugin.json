@@ -6,6 +6,10 @@
     "name": "Raghu Betina",
     "url": "https://github.com/raghubetina"
   },
-  "repository": "https://github.com/raghubetina/codex-review",
-  "keywords": ["codex", "code-review", "second-opinion"]
+  "repository": "https://github.com/raghubetina/cross-review",
+  "keywords": [
+    "codex",
+    "code-review",
+    "second-opinion"
+  ]
 }

@@ -6,7 +6,7 @@
     "name": "Raghu Betina",
     "url": "https://github.com/raghubetina"
   },
-  "repository": "https://github.com/raghubetina/claude-review",
+  "repository": "https://github.com/raghubetina/cross-review",
   "skills": "./skills/",
   "interface": {
     "displayName": "Claude Review",

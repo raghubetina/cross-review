@@ -163,12 +163,13 @@ Guardrails that apply in every mode:
    change refs, the index, the stash, or the working tree, no commits, no
    pushes, and revert any experiment before finishing.
 3. Runtime verification. Before invoking the reviewer, record HEAD and the
-   working-tree fingerprint. Afterwards: if HEAD moved, fail the job and
-   retire the session (the recorded "last reviewed HEAD" would otherwise be the
-   reviewer's commit). If the working tree changed on an ordinary review,
-   apply the result but attach a warning that lists the changed paths in the
-   job, the artifact, and the rendered output. Explicit `--resume-session`
-   reviews keep failing on any change, as today.
+   working-tree fingerprint. Afterwards, on an ordinary review, apply the
+   result and attach a warning to the job, the artifact, and the rendered
+   output if HEAD moved or the working tree changed, naming the changed paths.
+   A HEAD move is a warning rather than a failure because committing while a
+   background review runs has always been allowed and the runtime cannot tell
+   the user's commit from the reviewer's; the warning says so. Explicit
+   `--resume-session` reviews keep failing on any change, as today.
 4. Documented risk. In `full` mode the reviewer runs with the user's own
    privileges and network, while reading untrusted repository content.
    README and SKILL.md say so and recommend `--capability read-only` for
@@ -344,7 +345,7 @@ side on 2026-09-16.)
 None is kept. `STATE_VERSION` becomes 2 and the runtime ignores session and
 job files with any other version, printing one line that tells the user to
 delete the old `tmp/claude_reviews/` or `tmp/codex_reviews/` directory. Job
-files gain `capability`, `tree_warning`, and `conversation_id`. New flags are
+files gain `capability`, `checkout_warning`, and `conversation_id`. New flags are
 `--capability` and `--wait-minutes`; `--max-budget-usd` stays on the Claude
 backend.
 
@@ -360,9 +361,9 @@ claude-review.
 - Phase 1, shared core. Done 2026-09-16: `src/runtime.mjs` plus the two
   backends, copy step with a drift test, one suite parametrized over both
   backends, reviewed by both reviewers (section 10).
-- Phase 2, capabilities. Modes, scratch directory, checkout rules, HEAD and
-  tree verification, MCP inheritance, docs. Half a day plus live runs in each
-  mode against both CLIs.
+- Phase 2, capabilities. Done 2026-09-16: modes, scratch directory, checkout
+  rules, HEAD and tree verification as warnings, MCP and settings inheritance,
+  docs, live runs in `full` and `workspace` against both CLIs.
 - Phase 3, rubric and schema v2. Prompt, schema, renderer, NOTICE. Half a
   day, then compare artifacts on the same diff before and after.
 - Phase 4, ledger. Storage, decision parsing, prompt injection, retirement

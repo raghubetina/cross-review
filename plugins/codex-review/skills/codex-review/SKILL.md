@@ -1,6 +1,6 @@
 ---
 name: codex-review
-description: Run read-only Codex reviews from Claude Code with explicit working-tree, branch, commit, range, or whole-repository scopes; arbitrary repository paths; custom focus or follow-up feedback; persistent review threads that remember earlier findings and user decisions; and background job controls. Use when the user asks Codex to review code, wants a second opinion from Codex on changes, wants a re-review that does not repeat rejected findings, compares a branch to a base, reviews a commit or repository, or manages a running Codex review.
+description: Run Codex reviews from Claude Code with explicit working-tree, branch, commit, range, or whole-repository scopes; arbitrary repository paths; custom focus or follow-up feedback; persistent review threads that remember earlier findings and user decisions; and background job controls. Use when the user asks Codex to review code, wants a second opinion from Codex on changes, wants a re-review that does not repeat rejected findings, compares a branch to a base, reviews a commit or repository, or manages a running Codex review.
 argument-hint: "[working|branch <base>|commit <ref>|range <a>..<b>|repo|again|new|reset|status|result|cancel] [--background] [-- focus]"
 allowed-tools: Bash(node *)
 ---
@@ -31,7 +31,12 @@ node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" status --dir /path/to/repo
 
 ## Behavioral contract
 
-- Default to `working` scope and `--effort max`.
+- Default to `working` scope, `--effort max`, and `--capability full`, which lets Codex run tests, write scratch
+  code, install tools, and use your MCP servers while it reviews. Pass `--capability read-only` when the user says
+  the repository is untrusted, or `--capability workspace` when they want writes confined to the scratch directory.
+- Codex may only create files under the session's scratch directory, which the runtime creates and names in the
+  prompt. The runtime compares HEAD and the working tree after the review and prints a `Warning:` line if either
+  changed; relay that warning to the user verbatim.
 - Leave the Codex model unset unless the user requests one.
 - Resume the active Codex review session for the repository and branch. Each session is one persistent Codex thread, so a
   re-review sees the earlier findings and the user's decisions about them.

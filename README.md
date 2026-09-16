@@ -20,7 +20,7 @@ Requirements: Claude Code with plugin support (tested with 2.1.273), Codex CLI 0
 
 Or from a shell: `claude plugin marketplace add raghubetina/cross-review` then `claude plugin install codex-review@cross-review`. During development: `claude --plugin-dir /absolute/path/to/cross-review/plugins/codex-review`.
 
-Reviews run as detached background jobs by default because Claude Code caps each Bash call and a max-effort review often outlasts it; `result --wait` blocks for up to `--wait-minutes` (default 5) and can be called again. Every result prints a plugin session ID and the Codex thread ID, which `codex resume <thread-id>` opens interactively. Codex runs with a read-only sandbox and approvals set to never, and inherits your Codex configuration, MCP servers included. Artifacts live in the reviewed repository's ignored `tmp/codex_reviews/` directory.
+Reviews run as detached background jobs by default because Claude Code caps each Bash call and a max-effort review often outlasts it; `result --wait` blocks for up to `--wait-minutes` (default 5) and can be called again. Every result prints a plugin session ID and the Codex thread ID, which `codex resume <thread-id>` opens interactively. Artifacts live in the reviewed repository's ignored `tmp/codex_reviews/` directory.
 
 Details: [SKILL.md](plugins/codex-review/skills/codex-review/SKILL.md) and [interface.md](plugins/codex-review/skills/codex-review/references/interface.md).
 
@@ -35,7 +35,7 @@ codex plugin add claude-review@cross-review
 
 During local development: `codex plugin marketplace add /absolute/path/to/cross-review` then the same `codex plugin add`. After installation, start a new Codex process; in the ChatGPT desktop app, fully quit and reopen it so it rescans marketplaces. In Codex CLI, invoke the skill with `$claude-review`; `/claude-review` is not a slash command.
 
-Reviews are read-only, default to maximum reasoning effort, and can run in the background. Claude receives a bounded, secret-filtered Git context over stdin and only the `Read`, `Glob`, and `Grep` tools. Artifacts live in the reviewed repository's ignored `tmp/claude_reviews/` directory.
+Reviews default to maximum reasoning effort and can run in the background; `result --wait` blocks for up to `--wait-minutes` (default 5). Claude receives a bounded, secret-filtered Git context over stdin. Every result prints a plugin session ID and the Claude session ID, which `claude --resume <session-id>` opens interactively. Artifacts live in the reviewed repository's ignored `tmp/claude_reviews/` directory.
 
 Details: [SKILL.md](plugins/claude-review/skills/claude-review/SKILL.md) and [interface.md](plugins/claude-review/skills/claude-review/references/interface.md).
 
@@ -44,6 +44,18 @@ Details: [SKILL.md](plugins/claude-review/skills/claude-review/SKILL.md) and [in
 `again` repeats the previous scope in the current branch session. `--resume-session <session-id>` is the explicit exact-scope path for resuming an active session when branch identity changes. It requires a clean, committed scope; the stored tip must remain an ancestor of the current HEAD, the requested scope tip must equal that HEAD, and no other active session may own the destination checkout identity. Only this explicit-resume path samples the checkout's named-or-detached identity, HEAD, and cleanliness before invoking the reviewer and before applying the result. Leave that checkout untouched while the review runs; a transient change restored between samples cannot be detected.
 
 Once a reviewer process starts, any error, timeout, cancellation, worker death, checkout mismatch, malformed result, or persistence failure that prevents its result from being applied retires the plugin session at its last accepted scope and HEAD. Cancellation therefore ends continuity. `again` explains why a retired session cannot resume; an ordinary review starts a new isolated session and reports that transition. `new` starts a fresh session, and `reset` forgets the active session without deleting its artifacts. If necessary, each plugin adds its artifact directory to Git's local `info/exclude`; neither modifies the tracked `.gitignore`.
+
+## Reviewer capabilities
+
+The reviewer is the same agent you already trust to write code, so by default it can do whatever that agent can: run tests, write scratch code, install tools, download libraries, drive browsers, and call any MCP servers, hooks, and settings from your own Codex or Claude Code configuration. `--capability` selects the mode per review:
+
+| Mode | Codex backend | Claude backend |
+| --- | --- | --- |
+| `full` (default) | no sandbox, approvals never | `--permission-mode bypassPermissions`, all tools |
+| `workspace` | `workspace-write` sandbox with network and the scratch directory writable | same as `full` (Claude Code has no OS sandbox in headless mode) |
+| `read-only` | `read-only` sandbox, approvals never | `--tools Read,Glob,Grep --permission-mode dontAsk` |
+
+Each session has a scratch directory at `<artifact directory>/<task>/scratch/`, already ignored by Git, which the prompt names as the only place inside the repository the reviewer may create files; it persists across review rounds so a test harness from round one is reusable. The prompt also tells the reviewer to leave the checkout as found: no edits to tracked files, no new files outside scratch, no git commands that change refs, the index, the stash, or the working tree, and never a commit or push. After the review the runtime compares HEAD and the working tree with what it saw before and reports any difference as a warning on the job, in the artifact, and in the rendered result; explicit `--resume-session` reviews still fail on any change. In `full` mode the reviewer runs with your own privileges and network while reading repository content; use `--capability read-only` for a repository you do not trust.
 
 ## Develop
 

@@ -1,6 +1,6 @@
 ---
 name: claude-review
-description: Run read-only Claude Code reviews from Codex with explicit working-tree, branch, commit, range, or whole-repository scopes; arbitrary repository paths; custom focus or follow-up feedback; persistent review sessions; and background job controls. Use when a user asks Claude to review code, re-review changes without repeating rejected findings, compare a branch to a base, review a commit or repository, or manage a running Claude review.
+description: Run Claude Code reviews from Codex with explicit working-tree, branch, commit, range, or whole-repository scopes; arbitrary repository paths; custom focus or follow-up feedback; persistent review sessions; and background job controls. Use when a user asks Claude to review code, re-review changes without repeating rejected findings, compare a branch to a base, review a commit or repository, or manage a running Claude review.
 ---
 
 # Claude Review
@@ -31,7 +31,12 @@ node "$SKILL_DIR/scripts/claude-review.mjs" result --dir /path/to/repo
 
 ## Behavioral contract
 
-- Default to `working` scope and `--effort max`.
+- Default to `working` scope, `--effort max`, and `--capability full`, which lets Claude run tests, write scratch
+  code, install tools, and use its MCP servers while it reviews. Pass `--capability read-only` when the user says
+  the repository is untrusted.
+- Claude may only create files under the session's scratch directory, which the runtime creates and names in the
+  prompt. The runtime compares HEAD and the working tree after the review and prints a `Warning:` line if either
+  changed; relay that warning to the user verbatim.
 - Leave the Claude model unset unless the user requests one.
 - Resume the active Claude review session for the repository and branch.
 - Use `--resume-session SESSION_ID` with an exact new scope to resume a prior active session when branch identity changes,

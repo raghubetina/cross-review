@@ -56,6 +56,7 @@ The runtime also accepts trailing focus text without `--` when unambiguous.
 --resume-session <id>        resume this repository's prior active session
 --model <model>              explicitly select and persist a model for this session
 --effort <level>             low, medium, high, xhigh, or max; default max
+--capability <mode>          full (default), workspace, or read-only; see below
 --include-working            add local changes to branch, commit, or range scope
 --background                 start a persistent, detached background job
 --wait                       run a review in the foreground; with status or result, block until the job ends
@@ -63,6 +64,17 @@ The runtime also accepts trailing focus text without `--` when unambiguous.
 --timeout-minutes <number>   hard timeout for the Claude process; default 30
 --max-budget-usd <amount>    pass an API billing cap to Claude Code
 ```
+
+## Reviewer capabilities
+
+`full` gives the reviewer everything the Claude Code agent can normally do, including your MCP servers, hooks, and
+settings. `workspace` behaves like `full`, because Claude Code has no OS sandbox in headless mode. `read-only` restricts Claude to Read, Glob, and Grep.
+
+Every session has a scratch directory at `<task directory>/scratch/`, ignored by Git and named in the prompt as the
+only place inside the repository the reviewer may create files; it persists across rounds. The prompt tells the
+reviewer to leave the checkout as found and never commit or push. After the review the runtime compares HEAD and
+the working tree with what it saw before; any difference becomes a `Warning:` line in the result and a warning
+section in the artifact. Explicit `--resume-session` reviews still fail on any change.
 
 ## Job controls
 

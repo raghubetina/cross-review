@@ -1,6 +1,12 @@
 // Codex backend: Claude Code asks Codex to review through `codex exec`.
 
 const EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+const SANDBOX_MODE = { full: "danger-full-access", workspace: "workspace-write", "read-only": "read-only" };
+const FULL_PROMPT = {
+  tools: "Use shell commands, git, and any MCP tools available to you when you need surrounding code, repository-wide inspection, or to verify a finding by running it.",
+  repoScope: "Inspect the repository with shell commands such as ls, cat, rg, and git.",
+  truncation: "Inspect the listed files directly with shell commands."
+};
 
 function parseEvents(text) {
   const events = [];
@@ -42,25 +48,34 @@ export default {
   extraOptions: {},
   usesLastMessageFile: true,
   prompt: {
-    tools: "Use read-only commands such as cat, sed, rg, ls, and git show/log/diff only when you need surrounding code or repository-wide inspection.",
-    repoScope: "Inspect the repository with read-only commands such as ls, cat, rg, and git.",
-    truncation: "Inspect the listed files directly with read-only commands.",
-    conduct: "Run only read-only Git and diagnostic commands. Do not edit files, install dependencies, access the network, or start services."
+    full: FULL_PROMPT,
+    workspace: FULL_PROMPT,
+    "read-only": {
+      tools: "Use read-only commands such as cat, sed, rg, ls, and git show/log/diff only when you need surrounding code or repository-wide inspection.",
+      repoScope: "Inspect the repository with read-only commands such as ls, cat, rg, and git.",
+      truncation: "Inspect the listed files directly with read-only commands."
+    }
   },
 
-  buildArgs({ job, session, schemaPath, lastMessagePath }) {
+  buildArgs({ job, session, schemaPath, lastMessagePath, scratchDir, capability }) {
     const shared = [
       "--json",
       "--output-schema", schemaPath,
       "-o", lastMessagePath,
       "--skip-git-repo-check",
       "-c", `model_reasoning_effort=${JSON.stringify(job.effort)}`,
-      "-c", 'sandbox_mode="read-only"',
+      "-c", `sandbox_mode=${JSON.stringify(SANDBOX_MODE[capability])}`,
       "-c", 'approval_policy="never"'
     ];
+    if (capability === "workspace") {
+      shared.push(
+        "-c", "sandbox_workspace_write.network_access=true",
+        "-c", `sandbox_workspace_write.writable_roots=${JSON.stringify([scratchDir])}`
+      );
+    }
     if (job.model) shared.push("-m", job.model);
     if (job.resumed) return ["exec", "resume", session.conversation_id, "-", ...shared];
-    return ["exec", "-", "-s", "read-only", ...shared];
+    return ["exec", "-", ...shared];
   },
 
   earlyConversationId(line) {

@@ -1,6 +1,11 @@
 // Claude backend: Codex asks Claude Code to review through `claude -p`.
 
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+const FULL_PROMPT = {
+  tools: "Use your tools, including Bash, file reads, and any MCP servers available to you, when you need surrounding code, repository-wide inspection, or to verify a finding by running it.",
+  repoScope: "Inspect the repository with your tools.",
+  truncation: "Inspect the listed files directly."
+};
 
 export default {
   name: "claude",
@@ -24,23 +29,24 @@ export default {
   },
   usesLastMessageFile: false,
   prompt: {
-    tools: "Use Read, Glob, and Grep only when you need surrounding code or repository-wide inspection.",
-    repoScope: "Use Read, Glob, and Grep to inspect the repository.",
-    truncation: "Use Read/Glob/Grep to inspect listed files directly.",
-    conduct: "Run only read-only Git and diagnostic commands. Do not edit files, install dependencies, access the network, or start services."
+    full: FULL_PROMPT,
+    workspace: FULL_PROMPT,
+    "read-only": {
+      tools: "Use Read, Glob, and Grep only when you need surrounding code or repository-wide inspection.",
+      repoScope: "Use Read, Glob, and Grep to inspect the repository.",
+      truncation: "Use Read/Glob/Grep to inspect listed files directly."
+    }
   },
 
-  buildArgs({ job, session, schema }) {
-    const args = [
-      "-p",
-      "--permission-mode", "dontAsk",
-      "--tools", "Read,Glob,Grep",
-      "--setting-sources", "user",
-      "--strict-mcp-config",
+  buildArgs({ job, session, schema, capability }) {
+    const args = ["-p"];
+    if (capability === "read-only") args.push("--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep");
+    else args.push("--permission-mode", "bypassPermissions");
+    args.push(
       "--effort", job.effort,
       "--output-format", "json",
       "--json-schema", JSON.stringify(schema)
-    ];
+    );
     if (job.model) args.push("--model", job.model);
     const budget = job.backend_options?.max_budget_usd ?? null;
     if (budget !== null) args.push("--max-budget-usd", String(budget));

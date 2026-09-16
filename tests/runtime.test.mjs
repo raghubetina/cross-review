@@ -30,16 +30,18 @@ const BACKENDS = [
     logEnv: "FAKE_CODEX_LOG",
     delayEnv: "FAKE_CODEX_DELAY_MS",
     failEnv: "FAKE_CODEX_FAIL",
+    writeFileEnv: "FAKE_CODEX_WRITE_FILE",
+    commitEnv: "FAKE_CODEX_COMMIT",
     artifactDir: "tmp/codex_reviews",
     artifactSegments: ["tmp", "codex_reviews"],
     artifactBasename: "codex_reviews",
     conversationLabel: "Codex thread ID",
     jobIdPattern: /Codex review job: (\S+)/,
     isResume: (args) => args[0] === "exec" && args[1] === "resume",
-    assertFreshArgs(args) {
+    assertArgs(args, capability) {
+      const sandbox = { full: "danger-full-access", workspace: "workspace-write", "read-only": "read-only" }[capability];
       assert.equal(args[0], "exec");
-      assert.ok(args.includes("read-only"));
-      assert.ok(args.includes('sandbox_mode="read-only"'));
+      assert.ok(args.includes(`sandbox_mode="${sandbox}"`));
       assert.ok(args.includes('approval_policy="never"'));
       assert.ok(args.includes('model_reasoning_effort="max"'));
       assert.ok(args.includes("--json"));
@@ -47,6 +49,13 @@ const BACKENDS = [
       assert.ok(args.includes("--skip-git-repo-check"));
       assert.ok(!args.includes("--ephemeral"));
       assert.ok(!args.includes("-m"));
+      const writable = args.find((argument) => argument.startsWith("sandbox_workspace_write.writable_roots="));
+      if (capability === "workspace") {
+        assert.ok(args.includes("sandbox_workspace_write.network_access=true"));
+        assert.match(writable, /scratch"\]$/);
+      } else {
+        assert.equal(writable, undefined);
+      }
     },
     skillDirectory: path.resolve(TEST_ROOT, "../plugins/codex-review/skills/codex-review"),
     skillPatterns: [
@@ -65,20 +74,26 @@ const BACKENDS = [
     logEnv: "FAKE_CLAUDE_LOG",
     delayEnv: "FAKE_CLAUDE_DELAY_MS",
     failEnv: "FAKE_CLAUDE_FAIL",
+    writeFileEnv: "FAKE_CLAUDE_WRITE_FILE",
+    commitEnv: "FAKE_CLAUDE_COMMIT",
     artifactDir: "tmp/claude_reviews",
     artifactSegments: ["tmp", "claude_reviews"],
     artifactBasename: "claude_reviews",
     conversationLabel: "Claude session ID",
     jobIdPattern: /Claude review job: (\S+)/,
     isResume: (args) => args.includes("--resume"),
-    assertFreshArgs(args) {
-      assert.ok(args.includes("dontAsk"));
-      assert.ok(args.includes("Read,Glob,Grep"));
-      assert.ok(!args.some((argument) => argument.includes("Bash")));
-      assert.ok(args.includes("user"));
-      assert.ok(args.includes("--strict-mcp-config"));
+    assertArgs(args, capability) {
+      if (capability === "read-only") {
+        assert.ok(args.includes("dontAsk"));
+        assert.ok(args.includes("Read,Glob,Grep"));
+        assert.ok(!args.includes("bypassPermissions"));
+      } else {
+        assert.ok(args.includes("bypassPermissions"));
+        assert.ok(!args.includes("--tools"));
+      }
+      assert.ok(!args.includes("--setting-sources"));
+      assert.ok(!args.includes("--strict-mcp-config"));
       assert.equal(args[args.indexOf("--effort") + 1], "max");
-      assert.ok(args.includes("--session-id"));
       assert.ok(!args.includes("--model"));
     },
     skillDirectory: path.resolve(TEST_ROOT, "../plugins/claude-review/skills/claude-review"),
@@ -171,7 +186,10 @@ test("the backend contract is validated at startup", () => {
   assert.equal(validateBackend(claudeBackend), claudeBackend);
   assert.throws(() => validateBackend({ ...codexBackend, conversationStrategy: "nope" }), /unknown conversationStrategy/);
   assert.throws(() => validateBackend({ ...claudeBackend, defaultEffort: "ultra" }), /not one of its effort levels/);
-  assert.throws(() => validateBackend({ ...codexBackend, prompt: { ...codexBackend.prompt, conduct: "" } }), /prompt\.conduct/);
+  assert.throws(
+    () => validateBackend({ ...codexBackend, prompt: { ...codexBackend.prompt, full: { ...codexBackend.prompt.full, tools: "" } } }),
+    /prompt\.full\.tools/
+  );
   assert.throws(() => validateBackend({ ...claudeBackend, buildArgs: undefined }), /missing: buildArgs/);
 });
 
@@ -181,6 +199,9 @@ test("backends own their effort levels and extra options", () => {
   assert.equal(parseArguments(["--max-budget-usd", "2.5"], claudeBackend).options.backendOptions.max_budget_usd, 2.5);
   assert.throws(() => parseArguments(["--max-budget-usd", "0"], claudeBackend), /must be a positive number/);
   assert.throws(() => parseArguments(["--max-budget-usd", "2"], codexBackend), /Unknown option/);
+  assert.equal(parseArguments([], codexBackend).options.capability, "full");
+  assert.equal(parseArguments(["--capability", "read-only"], claudeBackend).options.capability, "read-only");
+  assert.throws(() => parseArguments(["--capability", "bogus"], codexBackend), /Unsupported capability/);
 });
 
 for (const B of BACKENDS) {
@@ -225,7 +246,7 @@ function defineSuite(B) {
     const result = command(process.execPath, [RUNTIME, "--dir", repo, ...args], {
       cwd: repo,
       env: reviewEnv(logPath, extraEnv),
-      allowFailure: extraEnv[B.failEnv] === "1",
+      allowFailure: extraEnv[B.failEnv] === "1" || extraEnv[B.commitEnv] === "1",
       timeout: 30_000
     });
     return { result, logPath };
@@ -308,7 +329,7 @@ function defineSuite(B) {
     assert.throws(() => resolveScope(repo, "branch", "main"), /requires at least one commit/);
   });
 
-  test(`[${B.name}] foreground review creates ignored artifacts and uses hardened max-effort invocation`, () => {
+  test(`[${B.name}] foreground review creates ignored artifacts and runs with full capability by default`, () => {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     fs.writeFileSync(path.join(repo, "new.txt"), "new\n", "utf8");
@@ -319,7 +340,12 @@ function defineSuite(B) {
     const invocation = calls(logPath)[0];
     assert.equal(invocation.cwd, resolveRepository(repo));
     assert.ok(!B.isResume(invocation.args));
-    B.assertFreshArgs(invocation.args);
+    B.assertArgs(invocation.args, "full");
+    assert.ok(invocation.args.includes("--session-id") || invocation.args[0] === "exec");
+    assert.match(invocation.input, /scratch work under .*scratch \(it persists across review rounds\)/);
+    assert.match(invocation.input, /never commit or push/);
+    assert.ok(fs.existsSync(path.join(sessions(repo)[0].directory, "scratch")));
+    assert.match(result.stdout, /Capability: full/);
     assert.deepEqual(invocation.schemaKeys, ["verdict", "summary", "findings", "residual_risk"]);
     assert.match(result.stdout, new RegExp(`${B.conversationLabel}: ${invocation.conversationId}`));
     assert.match(invocation.input, /focus on correctness/);
@@ -1470,6 +1496,55 @@ function defineSuite(B) {
       assert.equal(jobs(repo)[0].job.backend_options.max_budget_usd, 2.5);
     });
   }
+
+  test(`[${B.name}] read-only and workspace capabilities change the invocation and the prompt`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const readOnly = runReview(repo, ["working", "--capability", "read-only"]);
+    const first = calls(readOnly.logPath)[0];
+    B.assertArgs(first.args, "read-only");
+    assert.match(first.input, /Run only read-only Git and diagnostic commands/);
+    assert.doesNotMatch(first.input, /scratch work under/);
+    assert.equal(fs.existsSync(path.join(sessions(repo)[0].directory, "scratch")), false);
+    assert.match(readOnly.result.stdout, /Capability: read-only/);
+
+    const workspace = runReview(repo, ["again", "--capability", "workspace"]);
+    const second = calls(workspace.logPath)[1];
+    B.assertArgs(second.args, "workspace");
+    assert.match(second.input, /scratch work under/);
+    assert.match(workspace.result.stdout, /Capability: workspace/);
+    const artifact = fs.readFileSync(path.join(sessions(repo)[0].directory, "002-working.md"), "utf8");
+    assert.match(artifact, /- Capability: workspace/);
+  });
+
+  test(`[${B.name}] a reviewer that dirties the checkout gets a warning, not a failure`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const { result } = runReview(repo, ["working"], { [B.writeFileEnv]: "stray.txt" });
+    assert.match(result.stdout, /Status: completed/);
+    assert.match(result.stdout, /Warning: The working tree changed during the review: new or changed: \?\? stray\.txt/);
+    const job = jobs(repo)[0].job;
+    assert.match(job.checkout_warning, /stray\.txt/);
+    assert.match(fs.readFileSync(job.artifact, "utf8"), /## Warning\n\nThe working tree changed during the review/);
+    assert.equal(sessions(repo)[0].session.review_count, 1);
+    assert.equal(sessions(repo)[0].session.active, true);
+  });
+
+  test(`[${B.name}] a HEAD move during an ordinary review is reported and the new HEAD recorded`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const before = git(repo, "rev-parse", "HEAD");
+    const { result } = runReview(repo, ["working"], { [B.commitEnv]: "1" });
+    assert.match(result.stdout, /Status: completed/);
+    assert.match(result.stdout, /Warning: HEAD moved during the review \(from /);
+    assert.match(result.stdout, /if you did not commit, the reviewer did/);
+    const after = git(repo, "rev-parse", "HEAD");
+    assert.notEqual(after, before);
+    const session = sessions(repo)[0].session;
+    assert.equal(session.active, true);
+    assert.equal(session.review_count, 1);
+    assert.equal(session.last_head, after);
+  });
 
   test(`[${B.name}] the resume hint appears only once the reviewer has started`, () => {
     const repo = createRepo();

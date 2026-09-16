@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
+import { spawnSync } from "node:child_process";
 
 const args = process.argv.slice(2);
 if (args.includes("--version")) {
@@ -35,6 +37,14 @@ if (logPath) {
 
 const delay = Number(process.env.FAKE_CLAUDE_DELAY_MS || 0);
 if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+
+if (process.env.FAKE_CLAUDE_WRITE_FILE) {
+  fs.writeFileSync(path.join(process.cwd(), process.env.FAKE_CLAUDE_WRITE_FILE), "stray\n", "utf8");
+}
+if (process.env.FAKE_CLAUDE_COMMIT === "1") {
+  spawnSync("git", ["add", "-A"], { cwd: process.cwd() });
+  spawnSync("git", ["-c", "user.email=fake@example.com", "-c", "user.name=Fake", "commit", "-qm", "stray commit"], { cwd: process.cwd() });
+}
 
 if (process.env.FAKE_CLAUDE_FAIL === "1") {
   process.stderr.write("simulated Claude failure\n");

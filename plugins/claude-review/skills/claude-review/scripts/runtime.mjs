@@ -161,7 +161,7 @@ export function parseArguments(argv, activeBackend = backend) {
       index += 1;
       continue;
     }
-    if (extraOptions[argument]) {
+    if (Object.hasOwn(extraOptions, argument)) {
       const value = Number(takeValue(argv, index, argument));
       if (!Number.isFinite(value) || value <= 0) {
         throw new Error(`${argument} must be a positive number.`);

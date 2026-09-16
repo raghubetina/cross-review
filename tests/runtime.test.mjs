@@ -156,6 +156,14 @@ test("claude backend accepts single envelopes and transcript arrays", () => {
   assert.throws(() => parseReviewerOutput({ stdout: "not json" }, claudeBackend), /malformed JSON/);
 });
 
+test("positional words that match inherited object properties are not options", () => {
+  for (const backend of [codexBackend, claudeBackend]) {
+    assert.equal(parseArguments(["commit", "constructor"], backend).scopeArgument, "constructor");
+    assert.equal(parseArguments(["repo", "focus", "on", "constructor", "behavior"], backend).focus, "focus on constructor behavior");
+    assert.equal(parseArguments(["branch", "toString"], backend).scopeArgument, "toString");
+  }
+});
+
 test("backends own their effort levels and extra options", () => {
   assert.equal(parseArguments(["--effort", "ultra"], codexBackend).options.effort, "ultra");
   assert.throws(() => parseArguments(["--effort", "ultra"], claudeBackend), /Unsupported effort/);

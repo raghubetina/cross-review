@@ -39,6 +39,24 @@ Reviews default to maximum reasoning effort and can run in the background; `resu
 
 Details: [SKILL.md](plugins/claude-review/skills/claude-review/SKILL.md) and [interface.md](plugins/claude-review/skills/claude-review/references/interface.md).
 
+## Update
+
+Both hosts install a copy of the plugin, and both decide whether to fetch a new one by the version in the plugin manifest. So a release is a version bump in `plugins/codex-review/.claude-plugin/plugin.json`, `plugins/claude-review/.codex-plugin/plugin.json`, and `.claude-plugin/marketplace.json`, committed and pushed; a change without a bump never reaches an installed copy.
+
+Then, on each machine:
+
+```sh
+# Claude Code
+claude plugin marketplace update cross-review
+claude plugin update codex-review@cross-review
+
+# Codex
+codex plugin marketplace upgrade cross-review
+codex plugin add claude-review@cross-review
+```
+
+Restart Claude Code and start a new Codex session afterward; each loads plugins at startup.
+
 ## Session semantics, shared by both
 
 `again` repeats the previous scope in the current branch session. `--resume-session <session-id>` is the explicit exact-scope path for resuming an active session when branch identity changes. It requires a clean, committed scope; the stored tip must remain an ancestor of the current HEAD, the requested scope tip must equal that HEAD, and no other active session may own the destination checkout identity. Only this explicit-resume path samples the checkout's named-or-detached identity, HEAD, and cleanliness before invoking the reviewer and before applying the result. Leave that checkout untouched while the review runs; a transient change restored between samples cannot be detected.

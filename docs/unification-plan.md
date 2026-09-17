@@ -1,8 +1,7 @@
 # Plan: unify claude-review and codex-review, then improve both
 
-Status: revision 5, 2026-09-16. Phases 0 and 1 are done; sections 3, 4, and 7
-describe shipped code. Phases 2 to 6 remain and are ready to execute. Section
-10 logs every review round so far. Nothing here is implemented yet except where marked "(done in
+Status: revision 6, 2026-09-17. All six phases are done; the document now
+describes shipped code, and section 10 logs every review round. Nothing here is implemented yet except where marked "(done in
 codex-review)".
 
 ## 1. Goals
@@ -310,7 +309,7 @@ Extend `likelySecretPath` with `.netrc`, `.npmrc`, `.pypirc`, `*.tfvars`,
 and `AKIA[0-9A-Z]{16}` and replace the file body with a skip note. Tests cover
 each pattern.
 
-### 6.6 Host double-check step (both, small)
+### 6.6 Host double-check step (both, small). Done 2026-09-17, with a `cite` command in the runtime that prints the cited lines from the reviewed revision so the host does not reconstruct them by hand.
 
 SKILL.md for both hosts gains a step after results arrive: read only the lines
 each finding cites, classify it as agree, disagree with evidence, nuance,
@@ -380,7 +379,8 @@ claude-review.
   feeding inline, git-instruction, and patch-file delivery; commit log and
   stat for committed scopes; wider name filter and content sniffing; total
   cap on inlined untracked content.
-- Phase 6, host double-check and docs. Quarter day.
+- Phase 6, host double-check and docs. Done 2026-09-17: `cite` command plus
+  the classification step in both skills.
 
 ## 9. Decisions
 

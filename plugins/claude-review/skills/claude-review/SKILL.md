@@ -29,6 +29,24 @@ node "$SKILL_DIR/scripts/claude-review.mjs" status --dir /path/to/repo
 node "$SKILL_DIR/scripts/claude-review.mjs" result --dir /path/to/repo
 ```
 
+## After results arrive: double-check before relaying
+
+1. Run `node "$SKILL_DIR/scripts/claude-review.mjs" cite JOB_ID` (the job ID defaults to the latest). It prints
+   every finding with the lines it cites, read from the reviewed revision for committed scopes and from the
+   working tree for working scope, and marks what it cannot resolve.
+2. Classify each finding from those lines, opening the file at that revision for more context only when the
+   printed lines are not enough:
+   - agree: the cited code does what the finding says.
+   - disagree: it does not, and you can say why from the code.
+   - nuance: real, but the severity or framing is off; say how.
+   - false positive: the location exists at the reviewed revision but does not contain the claimed code.
+   - unverifiable: `cite` could not resolve the location, or the working tree changed since the review.
+3. Relay the findings with your classification and one line of reasoning each, keeping the reviewer's ids so the
+   user can decide with `reject F-...`, `accept F-...`, `defer F-...`, or `reopen F-...`; then relay the reviewer's
+   next steps, residual risk, and any `Warning:` line verbatim.
+4. You may have written the code under review. Default to treating a finding as valid unless the cited lines show
+   otherwise; do not argue from memory of intent.
+
 ## Behavioral contract
 
 - Default to `working` scope, `--effort max`, and `--capability full`, which lets Claude run tests, write scratch

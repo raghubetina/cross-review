@@ -59,6 +59,10 @@ Every review starts from a filtered view of the change: files whose names look l
 
 A change of at most 256 KB and 40 files is inlined, untracked files included up to 512 KB each and 2 MB in total. A larger change is summarized instead and the patch is handed over one of two ways: a reviewer that can run git gets the file list and the exact `git diff` command per file; Claude in `read-only` mode, which cannot, gets per-file patch files and the whole diff written under the session's task directory to read with its file tools. Both routes come from the same filtered view, so an omitted file is omitted everywhere and a redacted file is flagged on the fetch list. Only the diff counts toward the inline threshold; untracked files have their own caps.
 
+## The host double-checks before relaying
+
+Both skills tell the host agent to run `cite` on a finished job before relaying results. It prints every finding with the lines it cites, read from the reviewed revision for committed scopes and from the working tree for working scope, and marks anything it cannot resolve. The host classifies each finding as agree, disagree with evidence, nuance, false positive, or unverifiable, and relays that alongside the findings with their ids, so you can decide with `reject F-...` and friends. It is told to default to trusting a finding it cannot refute from the cited lines, since it may have written the code itself.
+
 ## Reviewer capabilities
 
 The reviewer is the same agent you already trust to write code, so by default it can do whatever that agent can: run tests, write scratch code, install tools, download libraries, drive browsers, and call any MCP servers, hooks, and settings from your own Codex or Claude Code configuration. `--capability` selects the mode per review:

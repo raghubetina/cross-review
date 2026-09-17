@@ -114,12 +114,18 @@ with a `resembles` flag folds into the earlier finding before the next round and
 ```text
 codex-review.mjs status [job-id] [--wait] [--dir <path>]
 codex-review.mjs result [job-id] [--wait] [--dir <path>]
+codex-review.mjs cite [job-id] [--dir <path>]
 codex-review.mjs cancel [job-id] [--dir <path>]
 ```
 
 When no job ID is supplied, operate on the latest applicable job. With `--wait`, `status` and `result` poll the job
 until it reaches a terminal status or `--wait-minutes` elapses, then print it; a still-running job says so, and
 another `--wait` call keeps waiting.
+
+`cite` prints each finding of a completed job with the lines it cites and three lines of context, read from the
+reviewed revision for committed scopes and from the working tree for working scope (flagged when the tree has
+changed since the review). A location it cannot resolve is marked unverifiable; credential-looking paths and
+contents are not shown. The host uses it to classify findings before relaying them.
 
 ## Important mappings
 

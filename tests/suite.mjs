@@ -39,6 +39,9 @@ const BACKENDS = [
     tagEnv: "FAKE_CODEX_TAG",
     hookEnv: "FAKE_CODEX_HOOK",
     reportIdEnv: "FAKE_CODEX_REPORT_ID",
+    fileEnv: "FAKE_CODEX_FILE",
+    lineStartEnv: "FAKE_CODEX_LINE_START",
+    lineEndEnv: "FAKE_CODEX_LINE_END",
     observationEnv: "FAKE_CODEX_OBSERVATION",
     titleEnv: "FAKE_CODEX_TITLE",
     artifactDir: "tmp/codex_reviews",
@@ -83,6 +86,9 @@ const BACKENDS = [
     tagEnv: "FAKE_CLAUDE_TAG",
     hookEnv: "FAKE_CLAUDE_HOOK",
     reportIdEnv: "FAKE_CLAUDE_REPORT_ID",
+    fileEnv: "FAKE_CLAUDE_FILE",
+    lineStartEnv: "FAKE_CLAUDE_LINE_START",
+    lineEndEnv: "FAKE_CLAUDE_LINE_END",
     observationEnv: "FAKE_CLAUDE_OBSERVATION",
     titleEnv: "FAKE_CLAUDE_TITLE",
     artifactDir: "tmp/claude_reviews",
@@ -468,6 +474,45 @@ function defineSuite(B) {
     assert.match(result.stderr, /Unknown finding id F-abcdef; this session's ledger has F-[0-9a-f]{6}\./);
     assert.equal(calls(first.logPath).length, 1);
     assert.equal(sessions(repo)[0].session.active, true);
+  });
+
+  test(`[${B.name}] cite prints the lines a finding refers to from the reviewed revision`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\n", "utf8");
+    git(repo, "add", "example.txt");
+    git(repo, "commit", "-m", "seven lines");
+    const tip = git(repo, "rev-parse", "HEAD");
+    runReview(repo, ["commit", "HEAD"], { [B.lineStartEnv]: "4", [B.lineEndEnv]: "5" });
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed after the review\n", "utf8");
+    const cited = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    assert.match(cited, new RegExp(`Lines are read from the reviewed revision ${tip}\\.`));
+    assert.match(cited, /F-[0-9a-f]{6} \[high\] Example defect — example\.txt:4-5\n  1 \| one\n  2 \| two\n  3 \| three\n> 4 \| four\n> 5 \| five\n  6 \| six\n  7 \| seven/);
+    assert.doesNotMatch(cited, /changed after the review/);
+
+    const beyond = runReview(repo, ["again"], { [B.lineStartEnv]: "40" });
+    const beyondId = beyond.result.stdout.match(/\[HIGH\] (F-[0-9a-f]{6})/)[1];
+    const citedBeyond = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    assert.match(citedBeyond, new RegExp(`${beyondId} \\[high\\] Example defect — example\\.txt:40\\n  unverifiable: line 40 is beyond the file's 7 lines`));
+
+    const missing = runReview(repo, ["again"], { [B.fileEnv]: "nope.txt" });
+    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, new RegExp(`unverifiable: nope\\.txt is not present at ${tip}`));
+    assert.ok(missing.result.stdout.includes("Status: completed"));
+  });
+
+  test(`[${B.name}] cite reads the working tree for working scope and flags drift`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\nmore\n", "utf8");
+    runReview(repo, ["working"], { [B.lineStartEnv]: "2" });
+    const fresh = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    assert.match(fresh, /Lines are read from the working tree, unchanged since the review\./);
+    assert.match(fresh, /  1 \| changed\n> 2 \| more\n$/);
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\nedited\n", "utf8");
+    const drifted = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    assert.match(drifted, /which has changed since the review; treat differences as unverifiable/);
+    assert.match(drifted, /> 2 \| edited\n  \(current working tree; may differ from what was reviewed\)/);
+    const secret = runReview(repo, ["again"], { [B.fileEnv]: ".env" });
+    assert.ok(secret.result.stdout.includes("Status: completed"));
+    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, /not shown: the path looks like a credential file/);
   });
 
   test(`[${B.name}] repo scope asks for pre-existing defects and drops the introduced-only rule`, () => {

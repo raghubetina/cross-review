@@ -73,7 +73,8 @@ const MAX_SUMMARY_LINES = 200;
 const MAX_FINGERPRINT_FILE_BYTES = 1024 * 1024;
 const LOCK_STALE_MS = 12 * 60 * 60 * 1000;
 const SCOPES = new Set(["working", "branch", "commit", "range", "repo"]);
-const ACTIONS = new Set(["again", "new", "reset", "status", "result", "cancel", "help"]);
+const ACTIONS = new Set(["again", "new", "reset", "status", "result", "cite", "cancel", "help"]);
+const CITE_CONTEXT_LINES = 3;
 function retiredSessionGuidanceText() {
   return `The ${label()} conversation may have advanced, so this plugin session was retired. Start a new isolated delta session instead of resuming it.`;
 }
@@ -222,6 +223,7 @@ Usage:
   ${script} reset
   ${script} status [job-id] [--wait]
   ${script} result [job-id] [--wait]
+  ${script} cite [job-id]
   ${script} cancel [job-id]
 
 Options:
@@ -373,7 +375,7 @@ export function parseArguments(argv, activeBackend = backend) {
 
   let scopeArgument = null;
   let selectedJobId = null;
-  if (["status", "result", "cancel"].includes(action)) {
+  if (["status", "result", "cite", "cancel"].includes(action)) {
     selectedJobId = positional.shift() ?? null;
   } else if (action === "branch" || action === "commit") {
     scopeArgument = positional.shift() ?? null;
@@ -394,13 +396,13 @@ export function parseArguments(argv, activeBackend = backend) {
   if (options.includeWorking && (action === "working" || action === "repo" || action === "again")) {
     throw new Error(`--include-working is not valid with ${action}.`);
   }
-  if ((action === "status" || action === "result" || action === "cancel" || action === "reset" || action === "help") && focus) {
+  if (["status", "result", "cite", "cancel", "reset", "help"].includes(action) && focus) {
     throw new Error(`${action} does not accept review focus text.`);
   }
-  if ((action === "status" || action === "result" || action === "cancel" || action === "reset") && options.background) {
+  if (["status", "result", "cite", "cancel", "reset"].includes(action) && options.background) {
     throw new Error(`${action} does not accept --background.`);
   }
-  if (["status", "result", "cancel", "reset", "help"].includes(action) && options.resumeSessionId) {
+  if (["status", "result", "cite", "cancel", "reset", "help"].includes(action) && options.resumeSessionId) {
     throw new Error(`${action} does not accept --resume-session.`);
   }
 
@@ -2057,6 +2059,16 @@ async function executeJob(root, job) {
       job.completed_at = new Date().toISOString();
       job.artifact = artifact;
       job.result_summary = parsedOutput.structured?.summary ?? parsedOutput.rawResult.split("\n").find(Boolean) ?? `${label()} review completed.`;
+      job.findings = (parsedOutput.structured?.findings ?? []).map((finding) => ({
+        id: finding.id,
+        severity: finding.severity,
+        title: finding.title,
+        file: finding.file ?? null,
+        line_start: finding.line_start ?? null,
+        line_end: finding.line_end ?? null,
+        observation: finding.observation,
+        disposition: finding.disposition ?? "open"
+      }));
       job.rendered_result = parsedOutput.structured ? renderStructured(parsedOutput.structured) : parsedOutput.rawResult;
       saveJob(root, job);
       const commitReview = () => {
@@ -2262,6 +2274,93 @@ function installCancellationHandlers(root, job) {
   };
 }
 
+function fileAtRevision(repoRoot, tip, file) {
+  const result = git(repoRoot, ["show", `${tip}:${file}`], { allowFailure: true, maxBuffer: MAX_DIFF_BUFFER_BYTES });
+  return result.status === 0 ? result.stdout : null;
+}
+
+// Prints each finding with the lines it cites, read from the reviewed
+// revision for committed scopes and from the working tree for working scope,
+// so the host can judge a claim against the code the reviewer actually saw.
+export function citeFindings(job) {
+  const lines = [`${label()} review job: ${job.id}`, `Status: ${job.status}`, `Scope: ${job.scope?.kind ?? "unknown"}`];
+  const findings = job.findings ?? [];
+  if (!findings.length) {
+    lines.push(job.status === "completed" ? "No findings to cite." : "No findings recorded for this job.");
+    return lines.join("\n");
+  }
+  const scope = job.scope;
+  const tip = scope.kind === "working" ? null : scopeTip(scope);
+  let workingDrifted = false;
+  let sourceNote;
+  if (tip) {
+    sourceNote = `Lines are read from the reviewed revision ${tip}.`;
+  } else {
+    const state = workingState(job.repo_root);
+    const fingerprint = state.dirty ? workingFingerprint(job.repo_root, state) : "";
+    workingDrifted = fingerprint !== (scope.fingerprint ?? "");
+    sourceNote = workingDrifted
+      ? "Lines are read from the current working tree, which has changed since the review; treat differences as unverifiable."
+      : "Lines are read from the working tree, unchanged since the review.";
+  }
+  lines.push(sourceNote, "");
+  for (const finding of findings) {
+    const location = finding.file
+      ? `${finding.file}${finding.line_start ? `:${finding.line_start}${finding.line_end && finding.line_end !== finding.line_start ? `-${finding.line_end}` : ""}` : ""}`
+      : "(no location cited)";
+    const flags = [finding.observation && finding.observation !== "new" ? finding.observation.replace("_", " ") : null, finding.disposition !== "open" ? finding.disposition : null].filter(Boolean);
+    lines.push(`${finding.id} [${finding.severity}] ${finding.title} — ${location}${flags.length ? ` (${flags.join(", ")})` : ""}`);
+    if (!finding.file) {
+      lines.push("  unverifiable: no file cited", "");
+      continue;
+    }
+    if (likelySecretPath(finding.file)) {
+      lines.push("  not shown: the path looks like a credential file", "");
+      continue;
+    }
+    let content;
+    if (tip) {
+      content = fileAtRevision(job.repo_root, tip, finding.file);
+      if (content === null) {
+        lines.push(`  unverifiable: ${finding.file} is not present at ${tip}`, "");
+        continue;
+      }
+    } else {
+      try {
+        content = fs.readFileSync(path.join(job.repo_root, finding.file), "utf8");
+      } catch {
+        lines.push(`  unverifiable: ${finding.file} is not in the working tree`, "");
+        continue;
+      }
+    }
+    if (containsSecret(content)) {
+      lines.push("  not shown: the file contains credential-looking content", "");
+      continue;
+    }
+    const fileLines = content.split("\n");
+    if (fileLines.at(-1) === "") fileLines.pop();
+    if (!Number.isInteger(finding.line_start)) {
+      lines.push(`  no line cited; the file has ${fileLines.length} lines`, "");
+      continue;
+    }
+    if (finding.line_start > fileLines.length) {
+      lines.push(`  unverifiable: line ${finding.line_start} is beyond the file's ${fileLines.length} lines`, "");
+      continue;
+    }
+    const start = Math.max(1, finding.line_start - CITE_CONTEXT_LINES);
+    const citedEnd = Math.min(fileLines.length, Number.isInteger(finding.line_end) ? Math.max(finding.line_end, finding.line_start) : finding.line_start);
+    const end = Math.min(fileLines.length, citedEnd + CITE_CONTEXT_LINES);
+    const width = String(end).length;
+    for (let number = start; number <= end; number += 1) {
+      const marker = number >= finding.line_start && number <= citedEnd ? ">" : " ";
+      lines.push(`${marker} ${String(number).padStart(width)} | ${fileLines[number - 1]}`);
+    }
+    if (workingDrifted) lines.push("  (current working tree; may differ from what was reviewed)");
+    lines.push("");
+  }
+  return lines.join("\n").trimEnd();
+}
+
 async function waitForJob(root, job, minutes) {
   const deadline = Date.now() + minutes * 60 * 1000;
   let current = job;
@@ -2332,6 +2431,11 @@ export async function main(activeBackend, scriptPath, argv = process.argv.slice(
         `Still ${selected.status} after ${parsed.options.waitMinutes} minute(s); run ${parsed.action} --wait again to keep waiting.\n`
       );
     }
+    return;
+  }
+  if (parsed.action === "cite") {
+    const selected = chooseJob(root, parsed.jobId);
+    process.stdout.write(`${citeFindings(selected)}\n`);
     return;
   }
   if (parsed.action === "cancel") {

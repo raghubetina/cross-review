@@ -495,6 +495,32 @@ bytes only, every untracked file is scanned before it is inlined or listed,
 summaries are redacted, diff prefixes are forced, oversized diffs fall back
 to per-file collection, and resemblance requires nearby lines.
 
+The Phase 6 commit closed the plan, and `cite` was exercised live on the
+reviews themselves: it printed each finding's cited lines from the reviewed
+revision as designed. Claude (job `review-mu5ku2l7-cd40ae`) reproduced a
+real escape: in working scope `cite` read whatever path a finding named, so
+a `..` path or a symlink printed a file outside the repository into the
+host's transcript; it also found that repo and include-working scopes were
+cited from HEAD while the reviewer had seen the working tree, that an
+unstructured or older job read as "no findings", that a range past the end
+of the file was silently clamped, and that the skill did not say how to open
+a file at the revision. Its pre-1.0 list added decision verbs that only
+count at the start of a sentence, a re-read of the session before the
+worker saves so a concurrent reset survives, a byte cap on injected notes,
+and a live smoke script. Codex (job `review-mu5ku06s-36bc84`) reproduced the
+same escape, showed that binary untracked files bypassed scanning yet were
+offered for retrieval, that provenance was lost when the index, the working
+copy, and the commit differ, that HEAD was missing from the drift check,
+that a resembling newcomer could still inherit a decision, and that a
+single file whose diff exceeds the buffer vanished silently. All applied:
+`cite` confines paths to the repository after resolving symlinks, reads the
+working tree for repo and include-working scopes with HEAD in the drift
+check, notes when the index or the commit holds a different version, marks
+ranges past the file, redacts rather than hides, and distinguishes no
+findings from none recorded; consolidation never merges into a decided
+entry; binary untracked files are scanned as bytes and never listed for
+retrieval; an overflowing single file stays visible on every route.
+
 Revision 2 was reviewed on the same Codex thread (`again`, job
 `review-mu3z9uiz-58cdc5`). It confirmed 2, 3, 4, 7, and 8 resolved and raised
 five points, answered in revision 3:

@@ -42,6 +42,7 @@ const BACKENDS = [
     fileEnv: "FAKE_CODEX_FILE",
     lineStartEnv: "FAKE_CODEX_LINE_START",
     lineEndEnv: "FAKE_CODEX_LINE_END",
+    noFindingsEnv: "FAKE_CODEX_NO_FINDINGS",
     observationEnv: "FAKE_CODEX_OBSERVATION",
     titleEnv: "FAKE_CODEX_TITLE",
     artifactDir: "tmp/codex_reviews",
@@ -89,6 +90,7 @@ const BACKENDS = [
     fileEnv: "FAKE_CLAUDE_FILE",
     lineStartEnv: "FAKE_CLAUDE_LINE_START",
     lineEndEnv: "FAKE_CLAUDE_LINE_END",
+    noFindingsEnv: "FAKE_CLAUDE_NO_FINDINGS",
     observationEnv: "FAKE_CLAUDE_OBSERVATION",
     titleEnv: "FAKE_CLAUDE_TITLE",
     artifactDir: "tmp/claude_reviews",
@@ -345,16 +347,18 @@ function defineSuite(B) {
     assert.match(replacement.result.stdout, new RegExp(`\\(resembles ${id}\\)`));
     assert.equal(Object.keys(inherited.ledger.findings).length, 2);
 
+    // The original carries a decision, so the resembling newcomer keeps its own identity.
     const [aliasId] = Object.keys(inherited.ledger.findings).filter((candidate) => candidate !== id);
     const decided = runReview(repo, ["again", "--", `accept ${aliasId}: fine`]);
-    assert.match(decided.result.stdout, new RegExp(`Decisions: ${id} accepted \\(fine\\)`));
+    assert.match(decided.result.stdout, new RegExp(`Decisions: ${aliasId} accepted \\(fine\\)`));
     const priorSection = calls(first.logPath).at(-1).input.match(/## Prior findings and decisions[\s\S]*?## What counts/)[0];
-    assert.equal((priorSection.match(/^- F-/gm) ?? []).length, 1);
-    assert.match(priorSection, new RegExp(`- ${id} `));
-    assert.match(priorSection, /disposition: accepted \(fine\)/);
-    const consolidated = sessions(repo)[1].session.ledger;
-    assert.equal(consolidated.aliases[aliasId], id);
-    assert.equal(consolidated.findings[id].disposition, "accepted");
+    assert.equal((priorSection.match(/^- F-/gm) ?? []).length, 2);
+    assert.match(priorSection, new RegExp(`- ${id} .*disposition: rejected \\(intentional\\)`));
+    assert.match(priorSection, new RegExp(`- ${aliasId} .*disposition: accepted \\(fine\\)`));
+    const ledger = sessions(repo)[1].session.ledger;
+    assert.equal(ledger.aliases?.[aliasId], undefined);
+    assert.equal(ledger.findings[id].disposition, "rejected");
+    assert.equal(ledger.findings[aliasId].disposition, "accepted");
   });
 
   test(`[${B.name}] a history rewrite hands the ledger to the replacement session`, () => {
@@ -364,12 +368,16 @@ function defineSuite(B) {
     const [id] = Object.keys(sessions(repo)[0].session.ledger.findings);
     runReview(repo, ["again", "--", `reject ${id}: intentional`]);
     git(repo, "commit", "--allow-empty", "--amend", "-m", "rewritten history");
+    // The rejected original keeps its identity, so the resembling entry from the
+    // second round is inherited alongside it rather than folded into it.
     const after = runReview(repo);
-    assert.match(after.result.stdout, /Notice: Previous session .* ended because the branch history no longer continues from its last reviewed HEAD; this review started a new session\. It inherited 1 prior finding and the decisions on them\./);
+    assert.match(after.result.stdout, /Notice: Previous session .* ended because the branch history no longer continues from its last reviewed HEAD; this review started a new session\. It inherited 2 prior findings and the decisions on them\./);
     const input = calls(first.logPath).at(-1).input;
     assert.match(input, new RegExp(`- ${id} \\[high\\] Example defect — example\\.txt:1 — observation: new; disposition: rejected \\(intentional\\)`));
     assert.equal(sessions(repo).length, 2);
     assert.equal(sessions(repo)[1].session.ledger.findings[id].disposition, "rejected");
+    // two inherited entries plus this round's own resembling report
+    assert.equal(Object.keys(sessions(repo)[1].session.ledger.findings).length, 3);
     const fresh = runReview(repo, ["new", "working"]);
     assert.doesNotMatch(fresh.result.stdout, /inherited/);
     assert.doesNotMatch(calls(first.logPath).at(-1).input, /## Prior findings and decisions/);
@@ -497,6 +505,101 @@ function defineSuite(B) {
     const missing = runReview(repo, ["again"], { [B.fileEnv]: "nope.txt" });
     assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, new RegExp(`unverifiable: nope\\.txt is not present at ${tip}`));
     assert.ok(missing.result.stdout.includes("Status: completed"));
+  });
+
+  test(`[${B.name}] cite stays inside the repository and reports ranges past the file`, () => {
+    const repo = createRepo();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-outside-`));
+    fs.writeFileSync(path.join(outside, "hosts.yml"), "MARKER-OUTSIDE\n", "utf8");
+    fs.symlinkSync(outside, path.join(repo, "link"), "dir");
+    fs.writeFileSync(path.join(repo, "example.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\n", "utf8");
+    const relative = path.relative(repo, path.join(outside, "hosts.yml"));
+    runReview(repo, ["working"], { [B.fileEnv]: relative });
+    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, /unverifiable: the cited path is outside the repository/);
+    runReview(repo, ["again"], { [B.fileEnv]: "link/hosts.yml" });
+    const viaLink = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    assert.match(viaLink, /unverifiable: the cited path resolves outside the repository/);
+    assert.doesNotMatch(viaLink, /MARKER-OUTSIDE/);
+    runReview(repo, ["again"], { [B.lineStartEnv]: "6", [B.lineEndEnv]: "40" });
+    const past = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    assert.match(past, /example\.txt:6-40\n  3 \| three\n  4 \| four\n  5 \| five\n> 6 \| six\n> 7 \| seven\n  cited range ends past the file's 7 lines here/);
+  });
+
+  test(`[${B.name}] cite reads the working tree for repo and include-working scopes and notes other versions`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "ONE-EDITED\n", "utf8");
+    runReview(repo, ["repo"], { [B.lineStartEnv]: "1" });
+    const repoCite = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    assert.match(repoCite, /Lines are read from the working tree, unchanged since the review\./);
+    assert.match(repoCite, /> 1 \| ONE-EDITED/);
+    const tip = git(repo, "rev-parse", "HEAD");
+    runReview(repo, ["commit", "HEAD", "--include-working"], { [B.lineStartEnv]: "1" });
+    const includeCite = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    assert.match(includeCite, /> 1 \| ONE-EDITED/);
+    assert.match(includeCite, new RegExp(`example\\.txt also differs at ${tip}; if the finding concerns the committed version, see \`git show ${tip}:example\\.txt\``));
+    git(repo, "add", "example.txt");
+    fs.writeFileSync(path.join(repo, "example.txt"), "ONE-EDITED-AGAIN\n", "utf8");
+    runReview(repo, ["new", "working"], { [B.lineStartEnv]: "1" });
+    const stagedCite = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    assert.match(stagedCite, /> 1 \| ONE-EDITED-AGAIN\n  staged and unstaged versions of example\.txt differ; lines shown are the working copy, `git show :example\.txt` shows the index/);
+    git(repo, "commit", "-qm", "commit the staged version");
+    const headMoved = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    assert.match(headMoved, /which has changed since the review; treat differences as unverifiable/);
+  });
+
+  test(`[${B.name}] cite distinguishes no findings from unrecorded findings and picks the current branch's job`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    runReview(repo, ["working"], { [B.noFindingsEnv]: "1" });
+    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, /The reviewer reported no findings\./);
+    const entry = jobs(repo)[0];
+    delete entry.job.findings;
+    fs.writeFileSync(entry.path, `${JSON.stringify(entry.job)}\n`, "utf8");
+    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, /No structured findings were recorded for this job; use result\./);
+
+    git(repo, "stash", "-q");
+    git(repo, "checkout", "-q", "-b", "feature");
+    fs.writeFileSync(path.join(repo, "example.txt"), "feature\n", "utf8");
+    const feature = runReview(repo, ["working"]);
+    const featureId = feature.result.stdout.match(B.jobIdPattern)[1];
+    git(repo, "checkout", "-q", "--", "example.txt");
+    git(repo, "checkout", "-q", "main");
+    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, new RegExp(`review job: ${entry.job.id}`));
+    git(repo, "checkout", "-q", "feature");
+    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, new RegExp(`review job: ${featureId}`));
+  });
+
+  test(`[${B.name}] a reset during a running review is not overwritten by its result`, async () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const logPath = fakeLogPath(repo);
+    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+      cwd: repo,
+      env: reviewEnv(logPath, { [B.delayEnv]: "2500" })
+    });
+    const id = started.stdout.match(B.jobIdPattern)?.[1];
+    for (let attempt = 0; attempt < 250; attempt += 1) {
+      if (fs.existsSync(logPath) && calls(logPath).length === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.match(command(process.execPath, [RUNTIME, "reset", "--dir", repo]).stdout, /Reset active/);
+    const finished = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
+    assert.match(finished, /Status: completed/);
+    const session = sessions(repo)[0].session;
+    assert.equal(session.active, false);
+    assert.ok(session.reset_at);
+    assert.equal(session.review_count, 1);
+  });
+
+  test(`[${B.name}] injected notes are capped by bytes`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const first = runReview(repo, ["working", "--", `first note ${"a".repeat(3000)}`]);
+    runReview(repo, ["again", "--", `second note ${"b".repeat(3000)}`]);
+    runReview(repo, ["again"]);
+    const input = calls(first.logPath).at(-1).input;
+    assert.match(input, /Earlier user notes:\n\n- second note b/);
+    assert.doesNotMatch(input, /- first note a/);
   });
 
   test(`[${B.name}] cite reads the working tree for working scope and flags drift`, () => {
@@ -1497,12 +1600,19 @@ function defineSuite(B) {
     for (let index = 1; index <= 45; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `changed ${index}\n`, "utf8");
     fs.writeFileSync(path.join(repo, "big-key.txt"), `${"x".repeat(600 * 1024)}\nAKIAIOSFODNN7EXAMPLE\n`, "utf8");
     fs.writeFileSync(path.join(repo, "big-plain.txt"), `${"y".repeat(600 * 1024)}\n`, "utf8");
+    fs.writeFileSync(path.join(repo, "client-state.db"), Buffer.concat([Buffer.from("SQLite\0\0"), Buffer.from("AKIAIOSFODNN7EXAMPLE")]));
+    fs.writeFileSync(path.join(repo, "plain.bin"), Buffer.from([0, 1, 2, 3, 255]));
     const working = runReview(repo, ["working"]);
     const input = calls(working.logPath).at(-1).input;
     assert.match(input, /tells you how to fetch the patch with git/);
     assert.match(input, /big-key\.txt \(content looks like a credential or private key\)/);
+    assert.match(input, /client-state\.db \(content looks like a credential or private key\)/);
     assert.doesNotMatch(input, /^- big-key\.txt/m);
+    assert.doesNotMatch(input, /^- client-state\.db/m);
     assert.match(input, /^- big-plain\.txt \(\d+ bytes exceeds the per-file limit\)$/m);
+    assert.match(input, /### Binary untracked files, not retrievable\n\n- plain\.bin/);
+    const catSection = input.match(/### Untracked files\n\nCommand: `cat <path>`[\s\S]*?(?=\n### |\n## |$)/)[0];
+    assert.doesNotMatch(catSection, /plain\.bin/);
     assert.doesNotMatch(input, /AKIAIOSFODNN7EXAMPLE/);
   });
 

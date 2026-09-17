@@ -100,14 +100,15 @@ steps and residual risk. The ids are recorded in the session ledger inside `sess
 
 ## Decisions
 
-A decision is your verdict on a finding, written anywhere in the focus text as `reject F-1a2b3c: reason`,
+A decision is your verdict on a finding, written at the start of a sentence or line in the focus text as `reject F-1a2b3c: reason`,
 `accept F-...`, `defer F-...`, or `reopen F-...`. The runtime records it on the finding before the reviewer starts,
 so it survives a review that fails or a session that retires, and shows every prior finding with its observation,
 disposition, and decision to the reviewer in each later round. A rejected finding can only come back as a
 reopen proposal with new evidence; reviewer output never changes a disposition. A decision on an id the session
 does not know fails before the reviewer runs. When a retired session is replaced, or the branch history is rewritten
 under an active session, the new session inherits the ledger and says so; `new` starts without it. An id printed
-with a `resembles` flag folds into the earlier finding before the next round and stays usable as an alias.
+with a `resembles` flag folds into the earlier finding before the next round and stays usable as an alias, unless
+you have already decided on the earlier finding, in which case both stay separate for you to decide.
 
 ## Job controls
 
@@ -123,9 +124,12 @@ until it reaches a terminal status or `--wait-minutes` elapses, then print it; a
 another `--wait` call keeps waiting.
 
 `cite` prints each finding of a completed job with the lines it cites and three lines of context, read from the
-reviewed revision for committed scopes and from the working tree for working scope (flagged when the tree has
-changed since the review). A location it cannot resolve is marked unverifiable; credential-looking paths and
-contents are not shown. The host uses it to classify findings before relaying them.
+reviewed revision for committed scopes and from the working tree for working, repo, and include-working scopes
+(flagged when the tree or HEAD has changed since the review, and noting when the index or the committed version
+of the file differs). Without a job ID it picks the latest job for the current checkout. A location it cannot
+resolve, or one outside the repository, is marked unverifiable; credential-looking paths are not shown and
+credential-looking values on printed lines are redacted. The host uses it to classify findings before relaying
+them.
 
 ## Important mappings
 

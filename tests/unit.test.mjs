@@ -128,7 +128,7 @@ test("splitPatches keys each patch by its post-image path", () => {
 
 test("parseDecisions reads verbs, ids, and reasons from focus text", () => {
   const decisions = parseDecisions(
-    "Looks fine. reject F-1a2b3c: public API; Accept F-2B3C4D and defer F-3c4d5e: next sprint\nreopen F-4d5e6f"
+    "Looks fine. reject F-1a2b3c: public API; Accept F-2B3C4D; defer F-3c4d5e: next sprint\nreopen F-4d5e6f"
   );
   assert.deepEqual(decisions, [
     { id: "F-1a2b3c", disposition: "rejected", text: "public API" },
@@ -137,6 +137,8 @@ test("parseDecisions reads verbs, ids, and reasons from focus text", () => {
     { id: "F-4d5e6f", disposition: "open", text: "" }
   ]);
   assert.deepEqual(parseDecisions("no decisions here, just rejecting nothing"), []);
+  assert.deepEqual(parseDecisions("should I accept F-1a2b3c? maybe we reject F-2b3c4d later"), []);
+  assert.deepEqual(parseDecisions("  accept F-1a2b3c"), [{ id: "F-1a2b3c", disposition: "accepted", text: "" }]);
 });
 
 test("consolidateLedger folds resembling entries into the earlier id and keeps the old id as an alias", () => {
@@ -156,6 +158,14 @@ test("consolidateLedger folds resembling entries into the earlier id and keeps t
   assert.equal(resolveFindingId(ledger, "F-000002"), "F-000001");
   assert.equal(resolveFindingId(ledger, "F-000003"), "F-000003");
   assert.equal(consolidateLedger(ledger), false);
+  const decided = {
+    findings: {
+      "F-000001": { first_job: "review-a", last_job: "review-a", title: "T", file: "a.js", severity: "high", observation: "new", disposition: "rejected", decision: { text: "no", at: "2026-01-01" } },
+      "F-000002": { first_job: "review-b", last_job: "review-b", title: "T", file: "a.js", severity: "high", observation: "new", resembles: "F-000001" }
+    }
+  };
+  assert.equal(consolidateLedger(decided), false);
+  assert.deepEqual(Object.keys(decided.findings).sort(), ["F-000001", "F-000002"]);
 });
 
 test("renderStructured shows ids, flags, trigger, evidence, and next steps", () => {

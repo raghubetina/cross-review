@@ -90,6 +90,12 @@ const structured = {
   next_steps: ["Fix the example."],
   residual_risk: "The fake reviewer did not execute tests."
 };
+if (process.env.FAKE_CODEX_NO_FINDINGS === "1") {
+  structured.verdict = "approve";
+  structured.summary = "Nothing material.";
+  structured.findings = [];
+  structured.next_steps = [];
+}
 const text = JSON.stringify(structured);
 const events = [
   { type: "item.completed", item: { id: "item_0", type: "agent_message", text } },

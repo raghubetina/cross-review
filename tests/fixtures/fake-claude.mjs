@@ -83,6 +83,13 @@ const structured = {
   residual_risk: "The fake reviewer did not execute tests."
 };
 
+if (process.env.FAKE_CLAUDE_NO_FINDINGS === "1") {
+  structured.verdict = "approve";
+  structured.summary = "Nothing material.";
+  structured.findings = [];
+  structured.next_steps = [];
+}
+
 process.stdout.write(`${JSON.stringify({
   type: "result",
   subtype: "success",

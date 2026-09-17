@@ -34,8 +34,8 @@ node "$SKILL_DIR/scripts/claude-review.mjs" result --dir /path/to/repo
 1. Run `node "$SKILL_DIR/scripts/claude-review.mjs" cite JOB_ID` (the job ID defaults to the latest). It prints
    every finding with the lines it cites, read from the reviewed revision for committed scopes and from the
    working tree for working scope, and marks what it cannot resolve.
-2. Classify each finding from those lines, opening the file at that revision for more context only when the
-   printed lines are not enough:
+2. Classify each finding from those lines. When they are not enough, open the file at the revision `cite`
+   names with `git show <revision>:<path>`, not with your file tools, which show the working tree:
    - agree: the cited code does what the finding says.
    - disagree: it does not, and you can say why from the code.
    - nuance: real, but the severity or framing is off; say how.

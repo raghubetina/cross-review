@@ -83,11 +83,13 @@ export const SEVERITIES = ["critical", "high", "medium", "low"];
 export const OBSERVATIONS = ["new", "persisting", "fixed", "reopen_proposed"];
 export const DISPOSITIONS = ["open", "accepted", "rejected", "deferred"];
 const DECISION_VERBS = { reject: "rejected", accept: "accepted", defer: "deferred", reopen: "open" };
-const DECISION_PATTERN = /\b(reject|accept|defer|reopen)\s+(F-[0-9a-f]{6})\b(?:\s*:\s*([^\n;]*))?/gi;
+const DECISION_PATTERN = /(?:^|[.;\n])\s*(reject|accept|defer|reopen)\s+(F-[0-9a-f]{6})\b(?:\s*:\s*([^\n;]*))?/gi;
+const MAX_NOTE_BYTES = 4096;
 
 // Decisions are the user's verdicts on findings, written as "reject F-1a2b3c:
-// reason", "accept F-...", "defer F-...", or "reopen F-..." anywhere in focus
-// text. They belong to the user and reviewer output never changes them.
+// reason", "accept F-...", "defer F-...", or "reopen F-..." at the start of a
+// sentence or line in the focus text, so "should I accept F-..." records
+// nothing. They belong to the user and reviewer output never changes them.
 export function parseDecisions(text) {
   const decisions = [];
   for (const match of String(text ?? "").matchAll(DECISION_PATTERN)) {
@@ -129,6 +131,9 @@ export function consolidateLedger(ledger) {
     const survivorId = resolveFindingId(ledger, entry.resembles);
     const survivor = findings[survivorId];
     if (!survivor || survivorId === id) continue;
+    // A finding the user has decided on keeps its identity; a resembling
+    // newcomer stays separate so the decision is never inherited by guesswork.
+    if (survivor.decision) continue;
     if (entry.decision && (!survivor.decision || String(entry.decision.at) > String(survivor.decision.at))) {
       survivor.decision = entry.decision;
       survivor.disposition = entry.disposition;
@@ -861,7 +866,8 @@ export function resolveScope(repoRoot, kind, argument, includeWorking = false, p
       changed_files: changedFiles
     };
   } else if (resolvedKind === "repo") {
-    scope = { kind: "repo", requested_argument: null, include_working: false, head };
+    const state = workingState(repoRoot);
+    scope = { kind: "repo", requested_argument: null, include_working: false, head, fingerprint: state.dirty ? workingFingerprint(repoRoot, state) : "" };
   } else {
     throw new Error(`Unsupported review scope: ${resolvedKind}`);
   }
@@ -1234,7 +1240,7 @@ function collectPatchSet(job, needPatches) {
         else parts.push(single.text);
       }
       text = parts.join("");
-      overflow = false;
+      overflow = unwritable.length > 0;
     }
     if (overflow) set.overflow = true;
     const patches = [];
@@ -1274,15 +1280,15 @@ function collectPatchSet(job, needPatches) {
           continue;
         }
         const buffer = fs.readFileSync(absolute);
-        if (!probablyText(buffer)) {
-          set.untracked.push({ file, skipped: "binary content" });
-          continue;
-        }
-        const text = buffer.toString("utf8");
-        if (containsSecret(text)) {
+        if (containsSecret(buffer.toString("latin1"))) {
           set.omitted.push(`${file} (content looks like a credential or private key)`);
           continue;
         }
+        if (!probablyText(buffer)) {
+          set.untracked.push({ file, skipped: "binary content", binary: true });
+          continue;
+        }
+        const text = buffer.toString("utf8");
         if (stat.size > MAX_UNTRACKED_FILE_BYTES) {
           set.untracked.push({ file, skipped: `${stat.size} bytes exceeds the per-file limit` });
           continue;
@@ -1357,12 +1363,20 @@ function renderGitRouteContext(set) {
   if (omitted) parts.push(omitted);
   parts.push("## Patch\n\nThe change is too large to inline. Fetch the patch yourself, file by file, with the commands below.");
   for (const section of set.sections) {
-    const files = section.files.map((file) => `- ${file}${set.redacted.includes(file) ? " (contains credential-looking content; treat the matches as secrets)" : ""}`).join("\n") || "(none)";
+    const files = section.files.map((file) => {
+      const notes = [];
+      if (set.redacted.includes(file)) notes.push("contains credential-looking content; treat the matches as secrets");
+      if (section.unwritable?.includes(file)) notes.push("its diff alone exceeds 64 MB");
+      return `- ${file}${notes.length ? ` (${notes.join("; ")})` : ""}`;
+    }).join("\n") || "(none)";
     parts.push(`### ${section.title}\n\nCommand: \`${section.hint}\`\n\n${files}`);
   }
-  if (set.untracked.length) {
-    parts.push(`### Untracked files\n\nCommand: \`cat <path>\`\n\n${set.untracked.map((entry) => `- ${entry.file}${entry.skipped ? ` (${entry.skipped})` : ""}`).join("\n")}`);
+  const retrievable = set.untracked.filter((entry) => !entry.binary);
+  const binaries = set.untracked.filter((entry) => entry.binary);
+  if (retrievable.length) {
+    parts.push(`### Untracked files\n\nCommand: \`cat <path>\`\n\n${retrievable.map((entry) => `- ${entry.file}${entry.skipped ? ` (${entry.skipped})` : ""}`).join("\n")}`);
   }
+  if (binaries.length) parts.push(`### Binary untracked files, not retrievable\n\n${binaries.map((entry) => `- ${entry.file}`).join("\n")}`);
   return parts.join("\n\n");
 }
 
@@ -1474,6 +1488,7 @@ function priorFindingsSection(session) {
   const open = findings.filter(([, entry]) => entry.observation !== "fixed").map(line);
   const resolved = findings.filter(([, entry]) => entry.observation === "fixed").map(line);
   const notes = (session.ledger.notes ?? []).slice(-10).map((note) => `- ${note.text}`);
+  while (notes.length && Buffer.byteLength(notes.join("\n")) > MAX_NOTE_BYTES) notes.shift();
   return `## Prior findings and decisions
 
 These findings were recorded in earlier rounds of this review session. The disposition is the user's verdict: open means undecided, accepted means the user agrees and will fix it, rejected means the user has decided against it, deferred means later.
@@ -2059,7 +2074,7 @@ async function executeJob(root, job) {
       job.completed_at = new Date().toISOString();
       job.artifact = artifact;
       job.result_summary = parsedOutput.structured?.summary ?? parsedOutput.rawResult.split("\n").find(Boolean) ?? `${label()} review completed.`;
-      job.findings = (parsedOutput.structured?.findings ?? []).map((finding) => ({
+      job.findings = !parsedOutput.structured ? null : parsedOutput.structured.findings.map((finding) => ({
         id: finding.id,
         severity: finding.severity,
         title: finding.title,
@@ -2072,6 +2087,13 @@ async function executeJob(root, job) {
       job.rendered_result = parsedOutput.structured ? renderStructured(parsedOutput.structured) : parsedOutput.rawResult;
       saveJob(root, job);
       const commitReview = () => {
+        const latest = readJson(sessionPath);
+        if (latest && latest.active === false && session.active !== false) {
+          // The user reset or retired this session while the review ran; keep that.
+          session.active = false;
+          session.reset_at = latest.reset_at ?? session.reset_at;
+          session.reset_reason = latest.reset_reason ?? session.reset_reason;
+        }
         atomicWriteText(artifact, artifactMarkdown(job, session, parsedOutput, invocation));
         session.last_reviewed_at = new Date().toISOString();
         session.review_count = Number(session.review_count ?? 0) + 1;
@@ -2284,27 +2306,33 @@ function fileAtRevision(repoRoot, tip, file) {
 // so the host can judge a claim against the code the reviewer actually saw.
 export function citeFindings(job) {
   const lines = [`${label()} review job: ${job.id}`, `Status: ${job.status}`, `Scope: ${job.scope?.kind ?? "unknown"}`];
-  const findings = job.findings ?? [];
-  if (!findings.length) {
-    lines.push(job.status === "completed" ? "No findings to cite." : "No findings recorded for this job.");
+  if (!Array.isArray(job.findings)) {
+    lines.push(job.status === "completed" ? "No structured findings were recorded for this job; use result." : "No findings recorded for this job.");
+    return lines.join("\n");
+  }
+  if (!job.findings.length) {
+    lines.push("The reviewer reported no findings.");
     return lines.join("\n");
   }
   const scope = job.scope;
-  const tip = scope.kind === "working" ? null : scopeTip(scope);
+  const fromTree = scope.kind === "working" || scope.kind === "repo" || Boolean(scope.include_working);
+  const tip = fromTree ? null : scopeTip(scope);
   let workingDrifted = false;
-  let sourceNote;
-  if (tip) {
-    sourceNote = `Lines are read from the reviewed revision ${tip}.`;
-  } else {
+  if (fromTree) {
+    const recorded = scope.kind === "working" || scope.kind === "repo" ? scope.fingerprint ?? "" : scope.working?.fingerprint ?? "";
     const state = workingState(job.repo_root);
-    const fingerprint = state.dirty ? workingFingerprint(job.repo_root, state) : "";
-    workingDrifted = fingerprint !== (scope.fingerprint ?? "");
-    sourceNote = workingDrifted
+    const current = state.dirty ? workingFingerprint(job.repo_root, state) : "";
+    workingDrifted = current !== recorded || headCommit(job.repo_root) !== (job.checkout_head ?? null);
+    lines.push(workingDrifted
       ? "Lines are read from the current working tree, which has changed since the review; treat differences as unverifiable."
-      : "Lines are read from the working tree, unchanged since the review.";
+      : "Lines are read from the working tree, unchanged since the review.");
+  } else {
+    lines.push(`Lines are read from the reviewed revision ${tip}.`);
   }
-  lines.push(sourceNote, "");
-  for (const finding of findings) {
+  lines.push("");
+  const root = fs.realpathSync.native(job.repo_root);
+  const inside = (candidate) => candidate === root || candidate.startsWith(root + path.sep);
+  for (const finding of job.findings) {
     const location = finding.file
       ? `${finding.file}${finding.line_start ? `:${finding.line_start}${finding.line_end && finding.line_end !== finding.line_start ? `-${finding.line_end}` : ""}` : ""}`
       : "(no location cited)";
@@ -2326,16 +2354,30 @@ export function citeFindings(job) {
         continue;
       }
     } else {
+      // The path comes from reviewer output, so it is confined to the repository
+      // both as written and after resolving symlinks.
+      const target = path.resolve(root, finding.file);
+      if (!inside(target)) {
+        lines.push("  unverifiable: the cited path is outside the repository", "");
+        continue;
+      }
+      let real;
       try {
-        content = fs.readFileSync(path.join(job.repo_root, finding.file), "utf8");
+        real = fs.realpathSync.native(target);
       } catch {
         lines.push(`  unverifiable: ${finding.file} is not in the working tree`, "");
         continue;
       }
-    }
-    if (containsSecret(content)) {
-      lines.push("  not shown: the file contains credential-looking content", "");
-      continue;
+      if (!inside(real)) {
+        lines.push("  unverifiable: the cited path resolves outside the repository", "");
+        continue;
+      }
+      try {
+        content = fs.readFileSync(real, "utf8");
+      } catch {
+        lines.push(`  unverifiable: ${finding.file} cannot be read`, "");
+        continue;
+      }
     }
     const fileLines = content.split("\n");
     if (fileLines.at(-1) === "") fileLines.pop();
@@ -2347,18 +2389,45 @@ export function citeFindings(job) {
       lines.push(`  unverifiable: line ${finding.line_start} is beyond the file's ${fileLines.length} lines`, "");
       continue;
     }
+    const requestedEnd = Number.isInteger(finding.line_end) ? Math.max(finding.line_end, finding.line_start) : finding.line_start;
+    const citedEnd = Math.min(fileLines.length, requestedEnd);
     const start = Math.max(1, finding.line_start - CITE_CONTEXT_LINES);
-    const citedEnd = Math.min(fileLines.length, Number.isInteger(finding.line_end) ? Math.max(finding.line_end, finding.line_start) : finding.line_start);
     const end = Math.min(fileLines.length, citedEnd + CITE_CONTEXT_LINES);
     const width = String(end).length;
     for (let number = start; number <= end; number += 1) {
       const marker = number >= finding.line_start && number <= citedEnd ? ">" : " ";
-      lines.push(`${marker} ${String(number).padStart(width)} | ${fileLines[number - 1]}`);
+      lines.push(`${marker} ${String(number).padStart(width)} | ${redactSecrets(fileLines[number - 1])}`);
+    }
+    if (requestedEnd > fileLines.length) {
+      lines.push(`  cited range ends past the file's ${fileLines.length} lines here; the reviewer may have cited a different version`);
+    }
+    if (fromTree) {
+      const working = scope.kind === "working" ? scope : scope.working;
+      if (working && working.staged_files?.includes(finding.file) && working.unstaged_files?.includes(finding.file)) {
+        lines.push(`  staged and unstaged versions of ${finding.file} differ; lines shown are the working copy, \`git show :${finding.file}\` shows the index`);
+      }
+      if (scope.include_working && scope.kind !== "working") {
+        const committedTip = scopeTip(scope);
+        if (committedTip && git(job.repo_root, ["diff", "--quiet", committedTip, "--", finding.file], { allowFailure: true }).status !== 0) {
+          lines.push(`  ${finding.file} also differs at ${committedTip}; if the finding concerns the committed version, see \`git show ${committedTip}:${finding.file}\``);
+        }
+      }
     }
     if (workingDrifted) lines.push("  (current working tree; may differ from what was reviewed)");
     lines.push("");
   }
   return lines.join("\n").trimEnd();
+}
+
+// Without a job id, cite prefers the latest job for the current checkout so a
+// host that started reviews on two branches does not cite the wrong one.
+function chooseCiteJob(root, repoRoot, jobId) {
+  if (jobId) return chooseJob(root, jobId);
+  const identity = currentBranchIdentity(repoRoot);
+  const jobs = loadJobs(root);
+  return jobs.find((job) => job.checkout_identity === identity && job.status === "completed")
+    ?? jobs.find((job) => job.checkout_identity === identity)
+    ?? chooseJob(root, null);
 }
 
 async function waitForJob(root, job, minutes) {
@@ -2434,7 +2503,7 @@ export async function main(activeBackend, scriptPath, argv = process.argv.slice(
     return;
   }
   if (parsed.action === "cite") {
-    const selected = chooseJob(root, parsed.jobId);
+    const selected = chooseCiteJob(root, repoRoot, parsed.jobId);
     process.stdout.write(`${citeFindings(selected)}\n`);
     return;
   }

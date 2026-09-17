@@ -51,7 +51,7 @@ Every review returns a verdict, a terse summary, findings, next steps, and resid
 
 ## Decisions
 
-Your verdict on a finding is a decision, written anywhere in the focus text: `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`. The runtime records it before the reviewer starts, so it survives a failed review or a retired session, and it shows every prior finding with its observation, disposition, and decision to the reviewer in each later round. Reviewer output never changes a disposition: a rejected finding can only come back as a reopen proposal with new evidence. When a retired session is replaced, or the branch history is rewritten under an active session, the new session inherits the ledger and says so; `new` starts without it. An id printed with a `resembles` flag folds into the earlier finding before the next round and stays usable as an alias.
+Your verdict on a finding is a decision, written at the start of a sentence or line in the focus text: `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`. The runtime records it before the reviewer starts, so it survives a failed review or a retired session, and it shows every prior finding with its observation, disposition, and decision to the reviewer in each later round. Reviewer output never changes a disposition: a rejected finding can only come back as a reopen proposal with new evidence. When a retired session is replaced, or the branch history is rewritten under an active session, the new session inherits the ledger and says so; `new` starts without it. An id printed with a `resembles` flag folds into the earlier finding before the next round and stays usable as an alias, unless you have already decided on the earlier finding; then both stay separate for you to decide.
 
 ## What the reviewer receives
 
@@ -79,9 +79,12 @@ Each session has a scratch directory at `<artifact directory>/<task>/scratch/`, 
 
 ```sh
 npm test
+npm run smoke
 ```
 
-Runs one suite, parametrized over both backends, against disposable Git repositories with fake `claude` and `codex` executables.
+`npm test` runs one suite, parametrized over both backends, against disposable Git repositories with fake `claude` and `codex` executables.
+
+`npm run smoke` is opt-in and spends reviewer usage: it runs a review, a resumed re-review, and `cite` against the real `claude` and `codex` CLIs on a disposable repository at low effort.
 
 The shared runtime lives in `src/runtime.mjs` with one backend module per reviewer in `src/backends/`. Each plugin's `scripts/` directory holds a five-line entry plus committed copies of the runtime and its backend, because both hosts copy an installed plugin out of the repository. After editing `src/`, run `npm run build` to refresh the copies; the test suite fails while a copy is stale.
 

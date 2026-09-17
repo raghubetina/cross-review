@@ -277,7 +277,7 @@ session, which `createTask` seeds from the accepted ledger.
 - `again` after retirement therefore works: new conversation, inherited ledger,
   and the output says so.
 
-### 6.4 Size-aware context (both, small)
+### 6.4 Size-aware context (both, small). Done 2026-09-16.
 
 Measure the diff first. Inline it when it is at most 256 KB and at most 40
 files. Otherwise send the changed-file list, `git log --oneline` for the
@@ -302,7 +302,7 @@ Always include log and stat for branch, range, and commit scopes. Keep the
 8 MB cut only as a last resort for untracked content and add a 2 MB total cap
 on inlined untracked files, listing what was skipped.
 
-### 6.5 Secret filter (both, small)
+### 6.5 Secret filter (both, small). Done 2026-09-16.
 
 Extend `likelySecretPath` with `.netrc`, `.npmrc`, `.pypirc`, `*.tfvars`,
 `id_ed25519*`, `id_ecdsa*`, `*.jks`, `*.keystore`, `.htpasswd`,
@@ -376,8 +376,10 @@ claude-review.
   into every later prompt, observations recorded without touching
   dispositions, ledger inherited after retirement, id-less entries
   consolidated by file and title.
-- Phase 5, context and secrets. Size-aware collection, caps, filter. Half a
-  day.
+- Phase 5, context and secrets. Done 2026-09-16: one filtered patch set
+  feeding inline, git-instruction, and patch-file delivery; commit log and
+  stat for committed scopes; wider name filter and content sniffing; total
+  cap on inlined untracked content.
 - Phase 6, host double-check and docs. Quarter day.
 
 ## 9. Decisions

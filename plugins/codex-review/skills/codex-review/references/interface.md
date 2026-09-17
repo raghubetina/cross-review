@@ -81,6 +81,15 @@ it saw before; any difference becomes a `Warning:` line naming the paths in the 
 the artifact. If HEAD moved, the session keeps the pre-review HEAD as its last reviewed commit. Explicit
 `--resume-session` reviews still fail on any change.
 
+## What the reviewer receives
+
+A filtered view of the change: credential-looking file names and any patch or untracked file whose content looks
+like a private key or access key are omitted, and the prompt says so. Committed scopes carry the commit log, the
+diff stat, and the SHAs. Up to 256 KB and 40 files are inlined (untracked files up to 512 KB each, 2 MB total); a
+larger change is summarized and the patch handed over as `git diff` commands per file when the reviewer can run
+git, or as per-file patch files under `<task directory>/context/<job-id>/` when it cannot (Claude in read-only
+mode).
+
 ## Result format
 
 Findings are sorted by severity then confidence. Each shows its id (`F-` plus six hex characters, assigned by the

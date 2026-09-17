@@ -9,12 +9,15 @@ import codexBackend from "../src/backends/codex.mjs";
 import {
   REVIEW_SCHEMA,
   consolidateLedger,
+  containsSecret,
+  likelySecretPath,
   normalizeStructured,
   parseArguments,
   parseDecisions,
   parseReviewerOutput,
   renderStructured,
   resolveFindingId,
+  splitPatches,
   validateBackend
 } from "../src/runtime.mjs";
 import { BACKENDS } from "./suite.mjs";
@@ -58,6 +61,48 @@ test("normalizeStructured assigns ids, sorts by severity then confidence, and fl
   assert.equal(byTitle["known again"].duplicate, true);
   assert.equal(byTitle["low one"].line_end, 5);
   assert.equal(normalizeStructured({ findings: [{ ...base, id: null, severity: "low", title: "t", file: null, line_start: null, confidence: 1 }] }, { scope: { kind: "repo" } }, {}).findings[0].location_missing, false);
+});
+
+test("likelySecretPath and containsSecret cover the documented patterns", () => {
+  for (const file of [
+    ".env", ".env.local", "config/.netrc", ".npmrc", ".pypirc", ".htpasswd", "credentials", "credentials.json", "secrets.yml",
+    "token.txt", "id_rsa", "id_ed25519", ".ssh/id_ecdsa.pub", "cert.pem", "server.key", "bundle.p12", "cert.pfx",
+    "prod.tfvars", "release.jks", "debug.keystore", "vault.kdbx"
+  ]) {
+    assert.equal(likelySecretPath(file), true, file);
+  }
+  for (const file of ["README.md", "src/token_parser.js", "environment.rb", "keys.js", "secretary.txt", "credentials_form.html"]) {
+    assert.equal(likelySecretPath(file), false, file);
+  }
+  assert.equal(containsSecret("-----BEGIN RSA PRIVATE KEY-----\nabc"), true);
+  assert.equal(containsSecret("-----BEGIN PRIVATE KEY-----"), true);
+  assert.equal(containsSecret("aws_access_key_id = AKIAIOSFODNN7EXAMPLE"), true);
+  assert.equal(containsSecret("token: ghp_abcdefghijklmnopqrstuvwxyz0123456789"), true);
+  assert.equal(containsSecret("AKIA is a prefix; -----BEGIN CERTIFICATE----- is fine"), false);
+});
+
+test("splitPatches keys each patch by its post-image path", () => {
+  const diff = [
+    "diff --git a/src/a.js b/src/a.js",
+    "index 1..2 100644",
+    "--- a/src/a.js",
+    "+++ b/src/a.js",
+    "@@ -1 +1 @@",
+    "-x",
+    "+y",
+    "diff --git a/gone.txt b/gone.txt",
+    "deleted file mode 100644",
+    "--- a/gone.txt",
+    "+++ /dev/null",
+    "@@ -1 +0,0 @@",
+    "-bye",
+    ""
+  ].join("\n");
+  const chunks = splitPatches(diff);
+  assert.deepEqual(chunks.map((chunk) => chunk.file), ["src/a.js", "gone.txt"]);
+  assert.match(chunks[0].patch, /^diff --git a\/src\/a\.js/);
+  assert.match(chunks[1].patch, /-bye\n$/);
+  assert.deepEqual(splitPatches(""), []);
 });
 
 test("parseDecisions reads verbs, ids, and reasons from focus text", () => {

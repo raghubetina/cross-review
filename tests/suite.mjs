@@ -1385,7 +1385,7 @@ function defineSuite(B) {
     assert.doesNotMatch(mismatchedStatus, /mismatched-session/);
   });
 
-  test(`[${B.name}] large tracked diffs are truncated instead of failing the review`, { timeout: 30_000 }, () => {
+  test(`[${B.name}] a diff too large to inline is handed over as git instructions`, { timeout: 60_000 }, () => {
     const repo = createRepo();
     const bigPath = path.join(repo, "big.txt");
     fs.writeFileSync(bigPath, `${"a".repeat(9 * 1024 * 1024)}\n`, "utf8");
@@ -1394,8 +1394,100 @@ function defineSuite(B) {
     fs.writeFileSync(bigPath, `${"b".repeat(9 * 1024 * 1024)}\n`, "utf8");
     const { result, logPath } = runReview(repo);
     assert.equal(result.status, 0);
-    assert.match(calls(logPath)[0].input, /(Diff|Context) truncated at 8388608 bytes/);
+    const input = calls(logPath)[0].input;
+    assert.ok(Buffer.byteLength(input) < 64 * 1024, `prompt is ${Buffer.byteLength(input)} bytes`);
+    assert.match(input, /The change was too large to inline; <repository_context> below summarizes it and tells you how to fetch the patch with git\./);
+    assert.match(input, /### Unstaged diff\n\nCommand: `git diff -- <path>`\n\n- big\.txt/);
+    assert.doesNotMatch(input, /^diff --git/m);
   });
+
+  test(`[${B.name}] secret-looking files and contents are omitted from the context`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, ".netrc"), "machine x login me password hunter2\n", "utf8");
+    fs.writeFileSync(path.join(repo, "id_ed25519"), "not really a key\n", "utf8");
+    fs.writeFileSync(path.join(repo, "prod.tfvars"), "db_password = \"hunter2\"\n", "utf8");
+    fs.writeFileSync(path.join(repo, "notes.txt"), "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n", "utf8");
+    fs.writeFileSync(path.join(repo, "aws.txt"), "aws_access_key_id=AKIAIOSFODNN7EXAMPLE\n", "utf8");
+    fs.writeFileSync(path.join(repo, "harmless.txt"), "nothing to see\n", "utf8");
+    fs.writeFileSync(path.join(repo, "example.txt"), "first\nghp_abcdefghijklmnopqrstuvwxyz0123456789\n", "utf8");
+    const { logPath } = runReview(repo, ["working"]);
+    const input = calls(logPath)[0].input;
+    assert.match(input, /## Files omitted for safety\n\nDo not open these\.\n\n/);
+    for (const file of [".netrc", "id_ed25519", "prod.tfvars"]) assert.match(input, new RegExp(`${file.replace(".", "\\.")} \\(potential credential or secret\\)`));
+    for (const file of ["notes.txt", "aws.txt", "example.txt"]) assert.match(input, new RegExp(`${file.replace(".", "\\.")} \\(content looks like a credential or private key\\)`));
+    assert.match(input, /### harmless\.txt\n```\nnothing to see/);
+    assert.doesNotMatch(input, /hunter2|PRIVATE KEY-----\nMIIB|AKIAIOSFODNN7EXAMPLE|ghp_abcdefghijklmnopqrstuvwxyz0123456789/);
+  });
+
+  test(`[${B.name}] inlined untracked content stops at the total cap and says so`, () => {
+    const repo = createRepo();
+    for (const index of [1, 2, 3, 4, 5]) fs.writeFileSync(path.join(repo, `blob${index}.txt`), `${"x".repeat(500 * 1024)}\n`, "utf8");
+    const { logPath } = runReview(repo, ["working"]);
+    const input = calls(logPath)[0].input;
+    assert.match(input, /blob5\.txt \(the total limit for inlined untracked content was reached\)/);
+    assert.doesNotMatch(input, /blob4\.txt \(/);
+  });
+
+  test(`[${B.name}] committed scopes carry a commit log, a diff stat, and the SHAs`, () => {
+    const repo = createRepo();
+    const base = git(repo, "rev-parse", "HEAD");
+    git(repo, "checkout", "-b", "feature");
+    fs.writeFileSync(path.join(repo, "example.txt"), "feature\n", "utf8");
+    git(repo, "add", "example.txt");
+    git(repo, "commit", "-m", "feature change");
+    const head = git(repo, "rev-parse", "HEAD");
+    const { logPath } = runReview(repo, ["branch", "main"]);
+    const input = calls(logPath)[0].input;
+    assert.match(input, new RegExp(`## Change summary\\n\\n- base: main \\(${base}\\)\\n- merge base: ${base}\\n- head: ${head}`));
+    assert.match(input, /### Commits\n\n[0-9a-f]{7,} feature change/);
+    assert.match(input, /### Diff stat\n\n example\.txt \| /);
+    assert.match(input, /## Scoped diff\n\ndiff --git a\/example\.txt/);
+    const commit = runReview(repo, ["commit", "HEAD"]);
+    const commitInput = calls(commit.logPath).at(-1).input;
+    assert.match(commitInput, new RegExp(`- commit: ${head}\\n- parent: ${base}`));
+    assert.match(commitInput, /### Commit\n\n[0-9a-f]{40} feature change\nCross Review Test, /);
+  });
+
+  test(`[${B.name}] many changed files are handed over as git instructions and secrets stay omitted`, () => {
+    const repo = createRepo();
+    for (let index = 1; index <= 45; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `content ${index}\n`, "utf8");
+    fs.writeFileSync(path.join(repo, ".npmrc"), "//registry/:_authToken=abc\n", "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-m", "many files");
+    const { logPath } = runReview(repo, ["commit", "HEAD"]);
+    const input = calls(logPath)[0].input;
+    assert.match(input, /## Patch\n\nThe change is too large to inline\./);
+    assert.match(input, /### Scoped commit diff\n\nCommand: `git diff [0-9a-f]{40}\.\.[0-9a-f]{40} -- <path>`\n\n- file1\.txt/);
+    assert.equal((input.match(/^- file\d+\.txt$/gm) ?? []).length, 45);
+    assert.match(input, /\.npmrc \(potential credential or secret\)/);
+    assert.doesNotMatch(input, /_authToken/);
+    assert.doesNotMatch(input, /^diff --git/m);
+  });
+
+  if (B.name === "claude") {
+    test(`[${B.name}] read-only mode gets patch files instead of git instructions`, () => {
+      const repo = createRepo();
+      for (let index = 1; index <= 45; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `content ${index}\n`, "utf8");
+      fs.writeFileSync(path.join(repo, ".npmrc"), "//registry/:_authToken=abc\n", "utf8");
+      fs.writeFileSync(path.join(repo, "notes.txt"), "-----BEGIN PRIVATE KEY-----\nabc\n", "utf8");
+      git(repo, "add", "-A");
+      git(repo, "commit", "-m", "many files");
+      const { logPath } = runReview(repo, ["commit", "HEAD", "--capability", "read-only"]);
+      const input = calls(logPath)[0].input;
+      assert.match(input, /lists the patch files written for you to read/);
+      assert.match(input, /## Patch files\n\nThe change is too large to inline\. The full diff is at .*000-full\.patch/);
+      const directory = input.match(/The full diff is at (.*)\/000-full\.patch/)[1];
+      assert.ok(directory.startsWith(fs.realpathSync.native(sessions(repo)[0].directory)));
+      const written = fs.readdirSync(directory).sort();
+      assert.equal(written.length, 46);
+      assert.ok(written.some((name) => /^\d{3}-file1\.txt\.patch$/.test(name)));
+      assert.ok(!written.some((name) => name.includes("npmrc") || name.includes("notes")));
+      assert.match(fs.readFileSync(path.join(directory, written.find((name) => name.endsWith("file1.txt.patch"))), "utf8"), /^diff --git a\/file1\.txt/);
+      assert.match(input, /\.npmrc \(potential credential or secret\)/);
+      assert.match(input, /notes\.txt \(content looks like a credential or private key\)/);
+      assert.doesNotMatch(input, /_authToken|BEGIN PRIVATE KEY/);
+    });
+  }
 
   test(`[${B.name}] cancellation records a consistent cancelled artifact`, async () => {
     const repo = createRepo();

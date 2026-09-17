@@ -53,6 +53,12 @@ Every review returns a verdict, a terse summary, findings, next steps, and resid
 
 Your verdict on a finding is a decision, written anywhere in the focus text: `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`. The runtime records it before the reviewer starts, so it survives a failed review or a retired session, and it shows every prior finding with its observation, disposition, and decision to the reviewer in each later round. Reviewer output never changes a disposition: a rejected finding can only come back as a reopen proposal with new evidence. When a retired session is replaced, or the branch history is rewritten under an active session, the new session inherits the ledger and says so; `new` starts without it. An id printed with a `resembles` flag folds into the earlier finding before the next round and stays usable as an alias.
 
+## What the reviewer receives
+
+Every review starts from a filtered view of the change: files whose names look like credentials (`.env*`, `.netrc`, `.npmrc`, `.pypirc`, `.htpasswd`, `credentials*`, `secrets*`, `token*`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.tfvars`, `*.jks`, `*.keystore`, `*.kdbx`) are left out by name, and any patch or untracked file whose content looks like a private key or an access key is left out by content. The prompt lists what was omitted and tells the reviewer not to open it. Committed scopes always include the commit log, the diff stat, and the base, merge-base, and head SHAs.
+
+A change of at most 256 KB and 40 files is inlined, untracked files included up to 512 KB each and 2 MB in total. A larger change is summarized instead and the patch is handed over one of two ways: a reviewer that can run git gets the file list and the exact `git diff` command per file; Claude in `read-only` mode, which cannot, gets per-file patch files and the whole diff written under the session's task directory to read with its file tools. Both routes come from the same filtered view, so an omitted file is omitted everywhere.
+
 ## Reviewer capabilities
 
 The reviewer is the same agent you already trust to write code, so by default it can do whatever that agent can: run tests, write scratch code, install tools, download libraries, drive browsers, and call any MCP servers, hooks, and settings from your own Codex or Claude Code configuration. `--capability` selects the mode per review:

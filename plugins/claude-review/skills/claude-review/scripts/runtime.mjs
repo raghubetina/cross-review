@@ -67,6 +67,8 @@ const MAX_INLINE_DIFF_FILES = 40;
 const MAX_DIFF_BUFFER_BYTES = 64 * 1024 * 1024;
 const MAX_UNTRACKED_FILE_BYTES = 512 * 1024;
 const MAX_UNTRACKED_TOTAL_BYTES = 2 * 1024 * 1024;
+const MAX_SNIFF_BYTES = 8 * 1024 * 1024;
+const RESEMBLANCE_LINE_WINDOW = 25;
 const MAX_SUMMARY_LINES = 200;
 const MAX_FINGERPRINT_FILE_BYTES = 1024 * 1024;
 const LOCK_STALE_MS = 12 * 60 * 60 * 1000;
@@ -1137,13 +1139,20 @@ export function likelySecretPath(filePath) {
 }
 
 const SECRET_CONTENT_PATTERNS = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  /-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----/,
   /\bAKIA[0-9A-Z]{16}\b/,
-  /\bghp_[A-Za-z0-9]{36}\b/
+  /\bghp_[A-Za-z0-9]{36}\b/,
+  /\bgithub_pat_[A-Za-z0-9_]{22,}\b/,
+  /\bsk_live_[A-Za-z0-9]{10,}\b/,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/
 ];
 
 export function containsSecret(text) {
   return SECRET_CONTENT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+export function redactSecrets(text) {
+  return SECRET_CONTENT_PATTERNS.reduce((output, pattern) => output.replace(new RegExp(pattern.source, "g"), "[redacted]"), String(text));
 }
 
 function probablyText(buffer) {
@@ -1168,7 +1177,7 @@ function safeChangedFiles(files) {
 
 function gitDiffText(repoRoot, args, files) {
   if (!files.length) return { text: "", overflow: false };
-  const result = spawnSync("git", ["-C", repoRoot, "-c", "core.quotePath=false", ...args, "--", ...files], {
+  const result = spawnSync("git", ["-C", repoRoot, "-c", "core.quotePath=false", ...args, "--src-prefix=a/", "--dst-prefix=b/", "--", ...files], {
     encoding: null,
     maxBuffer: MAX_DIFF_BUFFER_BYTES
   });
@@ -1204,35 +1213,52 @@ function limitedLines(text, limit = MAX_SUMMARY_LINES) {
 // One filtered view of the change that every delivery route consumes, so a
 // file omitted for safety is omitted the same way inline, in patch files, and
 // in the instructions handed to a reviewer that fetches the patch itself.
-function collectPatchSet(job) {
+function collectPatchSet(job, needPatches) {
   const repoRoot = job.repo_root;
   const scope = job.scope;
-  const set = { kind: scope.kind, summary: [], sections: [], omitted: [], untracked: [], overflow: false, gitHints: [] };
+  const set = { kind: scope.kind, summary: [], sections: [], omitted: [], redacted: [], untracked: [], overflow: false };
 
   const addDiffSection = (title, args, files, hint) => {
     const { safe, skipped } = safeChangedFiles(files);
     set.omitted.push(...skipped);
-    const { text, overflow } = gitDiffText(repoRoot, args, safe);
+    let { text, overflow } = gitDiffText(repoRoot, args, safe);
+    const unwritable = [];
+    if (overflow && needPatches) {
+      // A reviewer without git needs patch files, so fetch each file on its own.
+      const parts = [];
+      for (const file of safe) {
+        const single = gitDiffText(repoRoot, args, [file]);
+        if (single.overflow) unwritable.push(file);
+        else parts.push(single.text);
+      }
+      text = parts.join("");
+      overflow = false;
+    }
     if (overflow) set.overflow = true;
     const patches = [];
     for (const chunk of splitPatches(text)) {
       if (containsSecret(chunk.patch)) {
-        set.omitted.push(`${chunk.file} (content looks like a credential or private key)`);
-        continue;
+        set.redacted.push(chunk.file);
+        patches.push({ file: chunk.file, patch: redactSecrets(chunk.patch), redacted: true });
+      } else {
+        patches.push(chunk);
       }
-      patches.push(chunk);
     }
-    set.sections.push({ title, files: safe, patches, overflow, hint });
+    // The fetch list and the patch files come from the same surviving set.
+    const listed = overflow ? safe : [...new Set(patches.map((chunk) => chunk.file))];
+    set.sections.push({ title, files: listed, patches, overflow, unwritable, hint });
   };
 
   if (scope.kind === "working" || scope.working) {
     const working = scope.kind === "working" ? scope : scope.working;
-    set.summary.push(`## Git status\n\n${working.status || "(clean)"}`);
+    set.summary.push(`## Git status\n\n${redactSecrets(working.status || "(clean)")}`);
     addDiffSection("Staged diff", ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--submodule=short"], working.staged_files, "git diff --cached -- <path>");
     addDiffSection("Unstaged diff", ["diff", "--no-ext-diff", "--no-textconv", "--submodule=short"], working.unstaged_files, "git diff -- <path>");
     const untracked = safeChangedFiles(working.untracked_files);
     set.omitted.push(...untracked.skipped);
     let budget = MAX_UNTRACKED_TOTAL_BYTES;
+    // Every untracked file is scanned before it can be inlined or listed for
+    // retrieval; size limits only decide whether the text is inlined.
     for (const file of untracked.safe) {
       const absolute = path.join(repoRoot, file);
       try {
@@ -1241,12 +1267,8 @@ function collectPatchSet(job) {
           set.untracked.push({ file, skipped: "not a regular file" });
           continue;
         }
-        if (stat.size > MAX_UNTRACKED_FILE_BYTES) {
-          set.untracked.push({ file, skipped: `${stat.size} bytes exceeds the per-file limit` });
-          continue;
-        }
-        if (stat.size > budget) {
-          set.untracked.push({ file, skipped: "the total limit for inlined untracked content was reached" });
+        if (stat.size > MAX_SNIFF_BYTES) {
+          set.omitted.push(`${file} (too large to scan for credentials)`);
           continue;
         }
         const buffer = fs.readFileSync(absolute);
@@ -1257,6 +1279,14 @@ function collectPatchSet(job) {
         const text = buffer.toString("utf8");
         if (containsSecret(text)) {
           set.omitted.push(`${file} (content looks like a credential or private key)`);
+          continue;
+        }
+        if (stat.size > MAX_UNTRACKED_FILE_BYTES) {
+          set.untracked.push({ file, skipped: `${stat.size} bytes exceeds the per-file limit` });
+          continue;
+        }
+        if (stat.size > budget) {
+          set.untracked.push({ file, skipped: "the total limit for inlined untracked content was reached" });
           continue;
         }
         budget -= stat.size;
@@ -1272,34 +1302,41 @@ function collectPatchSet(job) {
     const shas = scope.kind === "branch"
       ? `- base: ${scope.base} (${scope.base_commit})\n- merge base: ${scope.merge_base}\n- head: ${scope.head}`
       : `- from: ${scope.from_ref} (${scope.from})\n- to: ${scope.to_ref} (${scope.to})`;
-    const log = limitedLines(git(repoRoot, ["log", "--oneline", "--no-decorate", range], { allowFailure: true }).stdout ?? "");
-    const stat = limitedLines(git(repoRoot, ["-c", "core.quotePath=false", "diff", "--stat=120", range], { allowFailure: true }).stdout ?? "");
+    const log = redactSecrets(limitedLines(git(repoRoot, ["log", "--oneline", "--no-decorate", range], { allowFailure: true }).stdout ?? ""));
+    const stat = redactSecrets(limitedLines(git(repoRoot, ["-c", "core.quotePath=false", "diff", "--stat=120", range], { allowFailure: true }).stdout ?? ""));
     set.summary.push(`## Change summary\n\n${shas}\n\n### Commits\n\n${log || "(none)"}\n\n### Diff stat\n\n${stat || "(none)"}`);
     addDiffSection("Scoped diff", ["diff", "--no-ext-diff", "--no-textconv", "--submodule=short", range], scope.changed_files, `git diff ${range} -- <path>`);
   } else if (scope.kind === "commit") {
-    const log = git(repoRoot, ["log", "-1", "--format=%H %s%n%an, %ad", scope.commit], { allowFailure: true }).stdout?.trim() ?? "";
-    const stat = limitedLines(git(repoRoot, ["-c", "core.quotePath=false", "show", "--stat=120", "--format=", scope.commit], { allowFailure: true }).stdout ?? "");
+    const log = redactSecrets(git(repoRoot, ["log", "-1", "--format=%H %s%n%an, %ad", scope.commit], { allowFailure: true }).stdout?.trim() ?? "");
+    const stat = redactSecrets(limitedLines(git(repoRoot, ["-c", "core.quotePath=false", "show", "--stat=120", "--format=", scope.commit], { allowFailure: true }).stdout ?? ""));
     set.summary.push(`## Change summary\n\n- commit: ${scope.commit}\n- parent: ${scope.parent ?? "(root commit)"}\n\n### Commit\n\n${log}\n\n### Diff stat\n\n${stat || "(none)"}`);
     const args = scope.parent
       ? ["diff", "--no-ext-diff", "--no-textconv", "--submodule=short", `${scope.parent}..${scope.commit}`]
-      : ["show", "--format=fuller", "--no-ext-diff", "--no-textconv", "--submodule=short", scope.commit];
+      : ["show", "--format=", "--no-ext-diff", "--no-textconv", "--submodule=short", scope.commit];
     addDiffSection("Scoped commit diff", args, scope.changed_files, scope.parent ? `git diff ${scope.parent}..${scope.commit} -- <path>` : `git show ${scope.commit} -- <path>`);
   } else if (scope.kind === "repo") {
     set.summary.push(`## Repository-wide scope\n\n${promptText(job).repoScope} Do not inspect ignored files or ${artifactRelative()}.`);
   }
 
-  set.fileCount = set.sections.reduce((count, section) => count + section.files.length, 0) + set.untracked.filter((entry) => entry.text).length;
-  set.totalBytes = set.sections.reduce((bytes, section) => bytes + section.patches.reduce((sum, chunk) => sum + Buffer.byteLength(chunk.patch), 0), 0)
-    + set.untracked.reduce((bytes, entry) => bytes + (entry.text ? Buffer.byteLength(entry.text) : 0), 0);
+  // Routing counts only the patch set; untracked content has its own caps.
+  set.fileCount = new Set(set.sections.flatMap((section) => section.files)).size;
+  set.patchBytes = set.sections.reduce((bytes, section) => bytes + section.patches.reduce((sum, chunk) => sum + Buffer.byteLength(chunk.patch), 0), 0);
   return set;
 }
 
 function renderOmitted(set) {
-  return set.omitted.length ? `## Files omitted for safety\n\nDo not open these.\n\n${set.omitted.join("\n")}` : "";
+  const parts = [];
+  if (set.omitted.length) parts.push(`## Files omitted for safety\n\nThe runtime removed these; do not fetch or open them.\n\n${set.omitted.join("\n")}`);
+  if (set.redacted.length) {
+    parts.push(`## Files with credential-looking content\n\nMatches in these patches were replaced with [redacted]; the real values are secrets, so never quote or reconstruct them.\n\n${set.redacted.map((file) => `- ${file}`).join("\n")}`);
+  }
+  return parts.join("\n\n");
 }
 
 function renderInlineContext(set) {
   const parts = [...set.summary];
+  const omitted = renderOmitted(set);
+  if (omitted) parts.push(omitted);
   for (const section of set.sections) {
     parts.push(`## ${section.title}\n\n${section.patches.map((chunk) => chunk.patch).join("") || "(none)"}`);
   }
@@ -1309,22 +1346,21 @@ function renderInlineContext(set) {
     );
     parts.push(`## Untracked files\n\n${blocks.join("\n\n") || "(none)"}`);
   }
-  const omitted = renderOmitted(set);
-  if (omitted) parts.push(omitted);
   return parts.join("\n\n");
 }
 
 function renderGitRouteContext(set) {
-  const parts = [...set.summary, "## Patch\n\nThe change is too large to inline. Fetch the patch yourself, file by file, with the commands below; the files listed under omitted must not be opened."];
+  const parts = [...set.summary];
+  const omitted = renderOmitted(set);
+  if (omitted) parts.push(omitted);
+  parts.push("## Patch\n\nThe change is too large to inline. Fetch the patch yourself, file by file, with the commands below.");
   for (const section of set.sections) {
-    const files = section.files.map((file) => `- ${file}`).join("\n") || "(none)";
+    const files = section.files.map((file) => `- ${file}${set.redacted.includes(file) ? " (contains credential-looking content; treat the matches as secrets)" : ""}`).join("\n") || "(none)";
     parts.push(`### ${section.title}\n\nCommand: \`${section.hint}\`\n\n${files}`);
   }
   if (set.untracked.length) {
     parts.push(`### Untracked files\n\nCommand: \`cat <path>\`\n\n${set.untracked.map((entry) => `- ${entry.file}${entry.skipped ? ` (${entry.skipped})` : ""}`).join("\n")}`);
   }
-  const omitted = renderOmitted(set);
-  if (omitted) parts.push(omitted);
   return parts.join("\n\n");
 }
 
@@ -1362,14 +1398,15 @@ function renderPatchFilesContext(job, set) {
     listing.push(`- ${path.join(directory, name)} (untracked file: ${entry.file})`);
     index += 1;
   }
+  for (const section of set.sections) {
+    for (const file of section.unwritable ?? []) listing.push(`- ${file} (${section.title.toLowerCase()}: the diff for this file alone exceeds 64 MB and was not written)`);
+  }
   const fullPath = path.join(directory, "000-full.patch");
   fs.writeFileSync(fullPath, full.join(""), "utf8");
-  const parts = [
-    ...set.summary,
-    `## Patch files\n\nThe change is too large to inline. The full diff is at ${fullPath}; per-file patches and untracked files are listed below. Read them with your file tools.\n\n${listing.join("\n") || "(none)"}`
-  ];
+  const parts = [...set.summary];
   const omitted = renderOmitted(set);
   if (omitted) parts.push(omitted);
+  parts.push(`## Patch files\n\nThe change is too large to inline. The full diff is at ${fullPath}; per-file patches and untracked files are listed below. Read them with your file tools.\n\n${listing.join("\n") || "(none)"}`);
   return parts.join("\n\n");
 }
 
@@ -1393,14 +1430,15 @@ function reviewerCanRunGit(job) {
 }
 
 function collectReviewContext(job) {
-  const set = collectPatchSet(job);
-  const inline = !set.overflow && set.totalBytes <= MAX_INLINE_DIFF_BYTES && set.fileCount <= MAX_INLINE_DIFF_FILES;
+  const canRunGit = reviewerCanRunGit(job);
+  const set = collectPatchSet(job, !canRunGit);
+  const inline = !set.overflow && set.patchBytes <= MAX_INLINE_DIFF_BYTES && set.fileCount <= MAX_INLINE_DIFF_FILES;
   let mode;
   let body;
   if (inline) {
     mode = "inline";
     body = renderInlineContext(set);
-  } else if (reviewerCanRunGit(job)) {
+  } else if (canRunGit) {
     mode = "git";
     body = renderGitRouteContext(set);
   } else {
@@ -1412,11 +1450,12 @@ function collectReviewContext(job) {
   if (Buffer.byteLength(combined) > MAX_PROMPT_CONTEXT_BYTES) {
     combined = `${Buffer.from(combined).subarray(0, MAX_PROMPT_CONTEXT_BYTES).toString("utf8")}\n\n[Context truncated at ${MAX_PROMPT_CONTEXT_BYTES} bytes. ${promptText(job).truncation}]`;
   }
+  const omittedRule = " Files listed under \"Files omitted for safety\" were removed by the runtime; do not fetch or open them. Values shown as [redacted] are secrets; never quote or reconstruct them.";
   const lead = {
     inline: "The exact Git context is included below inside <repository_context>.",
     git: "The change was too large to inline; <repository_context> below summarizes it and tells you how to fetch the patch with git.",
     files: "The change was too large to inline; <repository_context> below summarizes it and lists the patch files written for you to read."
-  }[mode];
+  }[mode] + omittedRule;
   return { mode, lead, text: `<repository_context>\n${combined}\n</repository_context>` };
 }
 
@@ -1696,8 +1735,11 @@ export function normalizeStructured(structured, job, session) {
     if (id && !known.has(id)) id = null;
     normalized.duplicate = Boolean(id && seen.has(id));
     if (!id) {
-      const resembles = byKey.get(ledgerKey(normalized));
-      if (resembles && !seen.has(resembles)) normalized.resembles = resembles;
+      const candidate = byKey.get(ledgerKey(normalized));
+      const candidateLine = candidate ? ledger[candidate]?.line_start : null;
+      const nearby = !Number.isInteger(candidateLine) || !Number.isInteger(normalized.line_start)
+        || Math.abs(candidateLine - normalized.line_start) <= RESEMBLANCE_LINE_WINDOW;
+      if (candidate && nearby && !seen.has(candidate)) normalized.resembles = candidate;
       id = newFindingId(taken);
     }
     seen.add(id);

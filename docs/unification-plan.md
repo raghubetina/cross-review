@@ -474,6 +474,27 @@ resembling another and keeps the folded id as an alias; a rewritten branch
 and a failed explicit resume both hand their ledger to the replacement; the
 prompt lists fixed findings separately and no longer asks for them again.
 
+The Phase 5 commit arrived inline for both reviewers (16 files, 86 KB), so
+each exercised the git and patch-file routes on synthetic 45-file commits
+instead. Claude (job `review-mu4y4c70-c9f3db`) found that the git route
+listed a content-omitted file on its fetch list while telling the reviewer
+not to open it, that dropping a whole patch for one credential-shaped string
+had hidden this commit's own test files from the reviewer, that untracked
+bytes counted toward the inline threshold so the documented untracked caps
+could never apply, that the do-not-open rule lived only inside the data
+block, and that a diff over the 64 MB buffer left the patch-file route
+empty. Codex (job `review-mu4y49nv-c7dfec`) found that commit subjects in
+the new summary bypassed the content filter, that untracked files skipped
+for size were offered for retrieval unscanned, that git's mnemonic prefixes
+broke the patch splitter, and that a new finding far from an older one with
+the same title was still folded into it and inherited its rejection. All
+applied: credential-shaped values inside committed patches are redacted
+rather than the patch dropped, the omitted and redacted lists come first
+and their rule is stated outside the data block, routing counts patch
+bytes only, every untracked file is scanned before it is inlined or listed,
+summaries are redacted, diff prefixes are forced, oversized diffs fall back
+to per-file collection, and resemblance requires nearby lines.
+
 Revision 2 was reviewed on the same Codex thread (`again`, job
 `review-mu3z9uiz-58cdc5`). It confirmed 2, 3, 4, 7, and 8 resolved and raised
 five points, answered in revision 3:

@@ -11,6 +11,7 @@ import {
   consolidateLedger,
   containsSecret,
   likelySecretPath,
+  redactSecrets,
   normalizeStructured,
   parseArguments,
   parseDecisions,
@@ -63,6 +64,18 @@ test("normalizeStructured assigns ids, sorts by severity then confidence, and fl
   assert.equal(normalizeStructured({ findings: [{ ...base, id: null, severity: "low", title: "t", file: null, line_start: null, confidence: 1 }] }, { scope: { kind: "repo" } }, {}).findings[0].location_missing, false);
 });
 
+test("a null-id finding resembles a known one only when it sits near the same lines", () => {
+  const job = { scope: { kind: "working" } };
+  const session = { ledger: { findings: { "F-aaaaaa": { title: "Unchecked null", file: "a.js", line_start: 10 } } } };
+  const base = { id: null, observation: "new", severity: "high", title: "Unchecked null", file: "a.js", body: "b", pre_existing: false, trigger: "", evidence: "", recommendation: "", confidence: 0.9 };
+  const near = normalizeStructured({ findings: [{ ...base, line_start: 20, line_end: 20 }] }, job, session).findings[0];
+  assert.equal(near.resembles, "F-aaaaaa");
+  const far = normalizeStructured({ findings: [{ ...base, line_start: 200, line_end: 200 }] }, job, session).findings[0];
+  assert.equal(far.resembles, undefined);
+  const unknownLine = normalizeStructured({ findings: [{ ...base, line_start: null, line_end: null }] }, job, session).findings[0];
+  assert.equal(unknownLine.resembles, "F-aaaaaa");
+});
+
 test("likelySecretPath and containsSecret cover the documented patterns", () => {
   for (const file of [
     ".env", ".env.local", "config/.netrc", ".npmrc", ".pypirc", ".htpasswd", "credentials", "credentials.json", "secrets.yml",
@@ -79,6 +92,14 @@ test("likelySecretPath and containsSecret cover the documented patterns", () => 
   assert.equal(containsSecret("aws_access_key_id = AKIAIOSFODNN7EXAMPLE"), true);
   assert.equal(containsSecret("token: ghp_abcdefghijklmnopqrstuvwxyz0123456789"), true);
   assert.equal(containsSecret("AKIA is a prefix; -----BEGIN CERTIFICATE----- is fine"), false);
+  assert.equal(containsSecret("-----BEGIN PGP PRIVATE KEY BLOCK-----"), true);
+  assert.equal(containsSecret("github_pat_11ABCDEFG0123456789abcdefgh"), true);
+  assert.equal(containsSecret("sk_live_abcdefghij1234"), true);
+  assert.equal(containsSecret("xoxb-1234567890-abcdefghij"), true);
+  assert.equal(
+    redactSecrets("key AKIAIOSFODNN7EXAMPLE and AKIAIOSFODNN7EXAMPLE again\n-----BEGIN RSA PRIVATE KEY-----"),
+    "key [redacted] and [redacted] again\n[redacted]"
+  );
 });
 
 test("splitPatches keys each patch by its post-image path", () => {

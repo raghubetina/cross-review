@@ -1412,11 +1412,64 @@ function defineSuite(B) {
     fs.writeFileSync(path.join(repo, "example.txt"), "first\nghp_abcdefghijklmnopqrstuvwxyz0123456789\n", "utf8");
     const { logPath } = runReview(repo, ["working"]);
     const input = calls(logPath)[0].input;
-    assert.match(input, /## Files omitted for safety\n\nDo not open these\.\n\n/);
+    assert.match(input, /## Files omitted for safety\n\nThe runtime removed these; do not fetch or open them\.\n\n/);
     for (const file of [".netrc", "id_ed25519", "prod.tfvars"]) assert.match(input, new RegExp(`${file.replace(".", "\\.")} \\(potential credential or secret\\)`));
-    for (const file of ["notes.txt", "aws.txt", "example.txt"]) assert.match(input, new RegExp(`${file.replace(".", "\\.")} \\(content looks like a credential or private key\\)`));
+    for (const file of ["notes.txt", "aws.txt"]) assert.match(input, new RegExp(`${file.replace(".", "\\.")} \\(content looks like a credential or private key\\)`));
+    assert.match(input, /## Files with credential-looking content\n\nMatches in these patches were replaced with \[redacted\][^\n]*\n\n- example\.txt/);
+    assert.match(input, /\+\[redacted\]\n/);
     assert.match(input, /### harmless\.txt\n```\nnothing to see/);
+    assert.match(input, /do not fetch or open them\. Values shown as \[redacted\] are secrets/);
+    assert.ok(input.indexOf("## Files omitted for safety") < input.indexOf("## Unstaged diff"));
     assert.doesNotMatch(input, /hunter2|PRIVATE KEY-----\nMIIB|AKIAIOSFODNN7EXAMPLE|ghp_abcdefghijklmnopqrstuvwxyz0123456789/);
+  });
+
+  test(`[${B.name}] untracked content does not push a small diff off the inline route`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    fs.writeFileSync(path.join(repo, "blob1.txt"), `${"x".repeat(300 * 1024)}\n`, "utf8");
+    fs.writeFileSync(path.join(repo, "blob2.txt"), `${"y".repeat(300 * 1024)}\n`, "utf8");
+    const { logPath } = runReview(repo, ["working"]);
+    const input = calls(logPath)[0].input;
+    assert.match(input, /The exact Git context is included below inside <repository_context>\./);
+    assert.match(input, /## Unstaged diff\n\ndiff --git a\/example\.txt[\s\S]*\+changed/);
+    assert.match(input, /### blob1\.txt\n```\nxxxx/);
+    assert.match(input, /### blob2\.txt\n```\nyyyy/);
+  });
+
+  test(`[${B.name}] commit subjects and oversized untracked files are scanned like everything else`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    git(repo, "add", "example.txt");
+    git(repo, "commit", "-m", "rotate key AKIAIOSFODNN7EXAMPLE now");
+    const commit = runReview(repo, ["commit", "HEAD"]);
+    const commitInput = calls(commit.logPath)[0].input;
+    assert.match(commitInput, /### Commit\n\n[0-9a-f]{40} rotate key \[redacted\] now/);
+    assert.doesNotMatch(commitInput, /AKIAIOSFODNN7EXAMPLE/);
+
+    for (let index = 1; index <= 45; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `content ${index}\n`, "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-m", "many files");
+    for (let index = 1; index <= 45; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `changed ${index}\n`, "utf8");
+    fs.writeFileSync(path.join(repo, "big-key.txt"), `${"x".repeat(600 * 1024)}\nAKIAIOSFODNN7EXAMPLE\n`, "utf8");
+    fs.writeFileSync(path.join(repo, "big-plain.txt"), `${"y".repeat(600 * 1024)}\n`, "utf8");
+    const working = runReview(repo, ["working"]);
+    const input = calls(working.logPath).at(-1).input;
+    assert.match(input, /tells you how to fetch the patch with git/);
+    assert.match(input, /big-key\.txt \(content looks like a credential or private key\)/);
+    assert.doesNotMatch(input, /^- big-key\.txt/m);
+    assert.match(input, /^- big-plain\.txt \(\d+ bytes exceeds the per-file limit\)$/m);
+    assert.doesNotMatch(input, /AKIAIOSFODNN7EXAMPLE/);
+  });
+
+  test(`[${B.name}] git prefix configuration does not hide file names from the filter`, () => {
+    const repo = createRepo();
+    git(repo, "config", "diff.mnemonicPrefix", "true");
+    fs.writeFileSync(path.join(repo, "example.txt"), "first\nghp_abcdefghijklmnopqrstuvwxyz0123456789\n", "utf8");
+    const { logPath } = runReview(repo, ["working"]);
+    const input = calls(logPath)[0].input;
+    assert.match(input, /## Files with credential-looking content[\s\S]*- example\.txt/);
+    assert.doesNotMatch(input, /\(unknown\)/);
+    assert.match(input, /diff --git a\/example\.txt b\/example\.txt/);
   });
 
   test(`[${B.name}] inlined untracked content stops at the total cap and says so`, () => {
@@ -1424,8 +1477,8 @@ function defineSuite(B) {
     for (const index of [1, 2, 3, 4, 5]) fs.writeFileSync(path.join(repo, `blob${index}.txt`), `${"x".repeat(500 * 1024)}\n`, "utf8");
     const { logPath } = runReview(repo, ["working"]);
     const input = calls(logPath)[0].input;
-    assert.match(input, /blob5\.txt \(the total limit for inlined untracked content was reached\)/);
-    assert.doesNotMatch(input, /blob4\.txt \(/);
+    assert.match(input, /### blob5\.txt\n\(skipped: the total limit for inlined untracked content was reached\)/);
+    assert.match(input, /### blob4\.txt\n```\nxxxx/);
   });
 
   test(`[${B.name}] committed scopes carry a commit log, a diff stat, and the SHAs`, () => {
@@ -1452,6 +1505,7 @@ function defineSuite(B) {
     const repo = createRepo();
     for (let index = 1; index <= 45; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `content ${index}\n`, "utf8");
     fs.writeFileSync(path.join(repo, ".npmrc"), "//registry/:_authToken=abc\n", "utf8");
+    fs.writeFileSync(path.join(repo, "keyish.txt"), "token=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n", "utf8");
     git(repo, "add", "-A");
     git(repo, "commit", "-m", "many files");
     const { logPath } = runReview(repo, ["commit", "HEAD"]);
@@ -1460,7 +1514,10 @@ function defineSuite(B) {
     assert.match(input, /### Scoped commit diff\n\nCommand: `git diff [0-9a-f]{40}\.\.[0-9a-f]{40} -- <path>`\n\n- file1\.txt/);
     assert.equal((input.match(/^- file\d+\.txt$/gm) ?? []).length, 45);
     assert.match(input, /\.npmrc \(potential credential or secret\)/);
-    assert.doesNotMatch(input, /_authToken/);
+    assert.doesNotMatch(input, /^- \.npmrc/m);
+    assert.match(input, /^- keyish\.txt \(contains credential-looking content; treat the matches as secrets\)$/m);
+    assert.ok(input.indexOf("## Files omitted for safety") < input.indexOf("## Patch\n"));
+    assert.doesNotMatch(input, /_authToken|ghp_abcdefghijklmnopqrstuvwxyz0123456789/);
     assert.doesNotMatch(input, /^diff --git/m);
   });
 
@@ -1479,12 +1536,16 @@ function defineSuite(B) {
       const directory = input.match(/The full diff is at (.*)\/000-full\.patch/)[1];
       assert.ok(directory.startsWith(fs.realpathSync.native(sessions(repo)[0].directory)));
       const written = fs.readdirSync(directory).sort();
-      assert.equal(written.length, 46);
+      assert.equal(written.length, 47);
       assert.ok(written.some((name) => /^\d{3}-file1\.txt\.patch$/.test(name)));
-      assert.ok(!written.some((name) => name.includes("npmrc") || name.includes("notes")));
+      assert.ok(!written.some((name) => name.includes("npmrc")));
       assert.match(fs.readFileSync(path.join(directory, written.find((name) => name.endsWith("file1.txt.patch"))), "utf8"), /^diff --git a\/file1\.txt/);
+      const notesPatch = fs.readFileSync(path.join(directory, written.find((name) => name.endsWith("notes.txt.patch"))), "utf8");
+      assert.match(notesPatch, /\+\[redacted\]\n/);
+      assert.doesNotMatch(notesPatch, /BEGIN PRIVATE KEY/);
+      assert.match(fs.readFileSync(path.join(directory, "000-full.patch"), "utf8"), /\[redacted\]/);
       assert.match(input, /\.npmrc \(potential credential or secret\)/);
-      assert.match(input, /notes\.txt \(content looks like a credential or private key\)/);
+      assert.match(input, /## Files with credential-looking content[\s\S]*- notes\.txt/);
       assert.doesNotMatch(input, /_authToken|BEGIN PRIVATE KEY/);
     });
   }

@@ -83,8 +83,9 @@ the artifact. If HEAD moved, the session keeps the pre-review HEAD as its last r
 
 ## What the reviewer receives
 
-A filtered view of the change: credential-looking file names and any patch or untracked file whose content looks
-like a private key or access key are omitted, and the prompt says so. Committed scopes carry the commit log, the
+A filtered view of the change: credential-looking file names and untracked files whose content looks like a
+private key or access key are omitted, credential-looking values inside committed patches are replaced with
+`[redacted]`, and the prompt says which, before the change itself. Committed scopes carry the commit log, the
 diff stat, and the SHAs. Up to 256 KB and 40 files are inlined (untracked files up to 512 KB each, 2 MB total); a
 larger change is summarized and the patch handed over as `git diff` commands per file when the reviewer can run
 git, or as per-file patch files under `<task directory>/context/<job-id>/` when it cannot (Claude in read-only

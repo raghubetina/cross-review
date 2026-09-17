@@ -1,6 +1,6 @@
 {
   "name": "claude-review",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Review working changes, branches, commits, ranges, or repositories with Claude from Codex.",
   "author": {
     "name": "Raghu Betina",
@@ -23,5 +23,6 @@
       "Ask Claude to review this branch against main.",
       "Show the latest Claude review result."
     ]
-  }
+  },
+  "license": "MIT"
 }

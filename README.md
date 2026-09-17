@@ -99,3 +99,7 @@ codex exec --ephemeral --sandbox read-only --cd /path/to/a/git/repository \
 ```
 
 The first should report a path inside the plugin directory and output beginning with `Codex Review`; the second a path under Codex's plugin cache and output beginning with `Claude Review`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The review rubric text adapted from OpenAI Codex is under the Apache License 2.0, see [NOTICE](NOTICE).

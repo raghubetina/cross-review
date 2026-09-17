@@ -1,6 +1,6 @@
 {
   "name": "codex-review",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Review working changes, branches, commits, ranges, or repositories with Codex from Claude Code, keeping one persistent Codex thread per review session.",
   "author": {
     "name": "Raghu Betina",
@@ -11,5 +11,6 @@
     "codex",
     "code-review",
     "second-opinion"
-  ]
+  ],
+  "license": "MIT"
 }

@@ -61,7 +61,7 @@ The runtime also accepts trailing focus text without `--` when unambiguous.
 --background                 start a persistent, detached background job
 --wait                       run a review in the foreground; with status or result, block until the job ends
 --wait-minutes <number>      longest a status or result --wait call blocks; default 5
---timeout-minutes <number>   hard timeout for the Claude process; default 30
+--timeout-minutes <number>   hard timeout for the Claude process; default none
 --max-budget-usd <amount>    pass an API billing cap to Claude Code
 ```
 

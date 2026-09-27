@@ -63,7 +63,7 @@ The runtime also accepts trailing focus text without `--` when unambiguous.
 --background                 start a persistent, detached background job
 --wait                       run a review in the foreground; with status or result, block until the job ends
 --wait-minutes <number>      longest a status or result --wait call blocks; default 5
---timeout-minutes <number>   hard timeout for the Codex process; default 30
+--timeout-minutes <number>   hard timeout for the Codex process; default none
 ```
 
 ## Reviewer capabilities

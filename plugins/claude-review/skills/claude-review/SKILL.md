@@ -82,7 +82,8 @@ node "$SKILL_DIR/scripts/claude-review.mjs" result --dir /path/to/repo
 - Choose foreground or background execution from the workflow. Prefer foreground when the result gates the current
   action; prefer background when useful independent work can continue or the review is likely to take a long time;
   ask the user when neither choice is clearly better. Honor an explicit user preference.
-- Do not impose an agent-side timeout or treat quiet elapsed time alone as a stalled review. Let a healthy review
+- A review has no deadline unless `--timeout-minutes` sets one; pass it only when the user asks for a time limit.
+  Do not impose an agent-side timeout or treat quiet elapsed time alone as a stalled review. Let a healthy review
   run until it completes, the user cancels it, or the runtime reports a failure. Poll in bounded increments and
   keep the user updated while waiting.
 - Use `status`, `result`, and `cancel` to manage background jobs. `result --wait` blocks for at most

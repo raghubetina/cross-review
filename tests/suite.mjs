@@ -33,6 +33,7 @@ const BACKENDS = [
     binEnv: "CODEX_REVIEW_CODEX_BIN",
     logEnv: "FAKE_CODEX_LOG",
     delayEnv: "FAKE_CODEX_DELAY_MS",
+    ignoreSigtermEnv: "FAKE_CODEX_IGNORE_SIGTERM",
     failEnv: "FAKE_CODEX_FAIL",
     writeFileEnv: "FAKE_CODEX_WRITE_FILE",
     commitEnv: "FAKE_CODEX_COMMIT",
@@ -69,7 +70,8 @@ const BACKENDS = [
     skillPatterns: [
       /\$\{CLAUDE_SKILL_DIR\}\/scripts\/codex-review\.mjs/,
       /Run reviews with `--background`/,
-      /call `result --wait` repeatedly/
+      /call `result --wait` repeatedly/,
+      /no deadline unless `--timeout-minutes` sets one/
     ]
   },
   {
@@ -81,6 +83,7 @@ const BACKENDS = [
     binEnv: "CLAUDE_REVIEW_CLAUDE_BIN",
     logEnv: "FAKE_CLAUDE_LOG",
     delayEnv: "FAKE_CLAUDE_DELAY_MS",
+    ignoreSigtermEnv: "FAKE_CLAUDE_IGNORE_SIGTERM",
     failEnv: "FAKE_CLAUDE_FAIL",
     writeFileEnv: "FAKE_CLAUDE_WRITE_FILE",
     commitEnv: "FAKE_CLAUDE_COMMIT",
@@ -118,7 +121,8 @@ const BACKENDS = [
     skillPatterns: [
       /\$SKILL_DIR\/scripts\/claude-review\.mjs/,
       /Choose foreground or background execution from the workflow/,
-      /Do not impose an agent-side timeout/
+      /Do not impose an agent-side timeout/,
+      /no deadline unless `--timeout-minutes` sets one/
     ]
   }
 ];
@@ -230,6 +234,33 @@ function defineSuite(B) {
     assert.throws(() => parseArguments(["--resume-session", "session-1", "range", "A..B", "--include-working"], B.module), /clean checkout/);
     assert.throws(() => parseArguments(["--resume-session", "session-1"], B.module), /exact committed scope/);
     assert.throws(() => parseArguments(["--resume-session", "session-1", "status"], B.module), /does not accept --resume-session/);
+  });
+
+  test(`[${B.name}] --timeout-minutes is optional and rejects values it cannot honor`, () => {
+    assert.equal(parseArguments([], B.module).options.timeoutMinutes, null);
+    assert.equal(parseArguments(["--timeout-minutes", "0.5"], B.module).options.timeoutMinutes, 0.5);
+    assert.equal(parseArguments(["--timeout-minutes", "35791"], B.module).options.timeoutMinutes, 35791);
+    for (const value of ["0", "-5", "abc", "NaN", "Infinity", "35792"]) {
+      assert.throws(
+        () => parseArguments(["--timeout-minutes", value], B.module),
+        /--timeout-minutes must be a positive number no greater than 35791; omit it for no time limit\./,
+        value
+      );
+    }
+    assert.throws(() => parseArguments(["--timeout-minutes"], B.module), /--timeout-minutes requires a value/);
+    assert.throws(() => parseArguments(["--timeout-minutes", "--background"], B.module), /--timeout-minutes requires a value/);
+
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const rejected = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--timeout-minutes", "0"], {
+      cwd: repo,
+      env: reviewEnv(fakeLogPath(repo)),
+      allowFailure: true
+    });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /--timeout-minutes must be a positive number/);
+    assert.equal(fs.existsSync(path.join(repo, ...B.artifactSegments)), false);
+    assert.match(command(process.execPath, [RUNTIME, "--help"]).stdout, /--timeout-minutes <number> +Hard timeout \(default: none\)/);
   });
 
 
@@ -1746,6 +1777,84 @@ function defineSuite(B) {
     });
     assert.notEqual(again.status, 0);
     assert.match(again.stderr, new RegExp(`previous ${B.label} review session.*retired`, "i"));
+  });
+
+  test(`[${B.name}] a review without --timeout-minutes records no deadline and runs to completion`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+      cwd: repo,
+      env: reviewEnv(fakeLogPath(repo), { [B.delayEnv]: "1500" })
+    });
+    const id = started.stdout.match(B.jobIdPattern)?.[1];
+    assert.ok(id);
+    assert.equal(jobs(repo)[0].job.timeout_minutes, null);
+    const finished = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
+      cwd: repo,
+      timeout: 30_000
+    }).stdout;
+    assert.match(finished, /Status: completed/);
+    assert.match(finished, /Example defect/);
+    assert.equal(sessions(repo)[0].session.active, true);
+    assert.equal(sessions(repo)[0].session.review_count, 1);
+  });
+
+  test(`[${B.name}] an explicit --timeout-minutes stops the reviewer and retires the session`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const logPath = fakeLogPath(repo);
+    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background", "--timeout-minutes", "0.1"], {
+      cwd: repo,
+      env: reviewEnv(logPath, { [B.delayEnv]: "60000" })
+    });
+    const id = started.stdout.match(B.jobIdPattern)?.[1];
+    assert.ok(id);
+    assert.equal(jobs(repo)[0].job.timeout_minutes, 0.1);
+    const finished = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
+      cwd: repo,
+      timeout: 30_000
+    }).stdout;
+    assert.match(finished, /Status: failed/);
+    assert.match(finished, new RegExp(`Error: ${B.label} review timed out after 0\\.1 minute\\(s\\)\\. .*session was retired`));
+    const artifact = finished.match(/Artifact: (.+)/)?.[1];
+    assert.ok(artifact);
+    assert.match(fs.readFileSync(artifact, "utf8"), /- Status: failed[\s\S]*timed out after 0\.1 minute\(s\)/);
+    const session = sessions(repo)[0].session;
+    assert.equal(session.active, false);
+    assert.equal(session.retired_job_id, id);
+    assert.equal(session.review_count, 0);
+    assert.throws(() => process.kill(calls(logPath)[0].pid, 0), { code: "ESRCH" });
+  });
+
+  test(`[${B.name}] cancelling a reviewer that ignores SIGTERM still ends the job`, async () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const logPath = fakeLogPath(repo);
+    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+      cwd: repo,
+      env: reviewEnv(logPath, { [B.delayEnv]: "60000", [B.ignoreSigtermEnv]: "1" })
+    });
+    const id = started.stdout.match(B.jobIdPattern)?.[1];
+    assert.ok(id);
+    for (let attempt = 0; attempt < 500; attempt += 1) {
+      if (fs.existsSync(logPath) && calls(logPath).length === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const { pid } = calls(logPath)[0];
+    command(process.execPath, [RUNTIME, "cancel", id, "--dir", repo]);
+
+    let job;
+    const jobFile = path.join(repo, ...B.artifactSegments, "jobs", `${id}.json`);
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      job = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+      if (job.status === "cancelled" && job.artifact) break;
+    }
+    assert.equal(job.status, "cancelled");
+    assert.match(job.error, /^Cancelled by user\./);
+    assert.ok(job.artifact);
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    assert.equal(sessions(repo)[0].session.active, false);
   });
 
   test(`[${B.name}] a newer reset is not misreported as an older retirement`, () => {

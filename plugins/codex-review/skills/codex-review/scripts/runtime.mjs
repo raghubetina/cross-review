@@ -57,7 +57,8 @@ function artifactRelative() {
 const STATE_VERSION = 2;
 export const CAPABILITIES = ["full", "workspace", "read-only"];
 const DEFAULT_CAPABILITY = "full";
-const DEFAULT_TIMEOUT_MINUTES = 30;
+// setTimeout fires at once for a delay beyond 2^31 - 1 milliseconds.
+const MAX_TIMEOUT_MINUTES = Math.floor((2 ** 31 - 1) / 60_000);
 const DEFAULT_WAIT_MINUTES = 5;
 const WAIT_POLL_INTERVAL_MS = 2_000;
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
@@ -241,7 +242,7 @@ Options:
   --background                 Start a background review
   --wait                       Run a review in the foreground; block status/result until the job ends
   --wait-minutes <number>      Longest a status or result --wait call blocks (default: 5)
-  --timeout-minutes <number>   Hard timeout (default: 30)
+  --timeout-minutes <number>   Hard timeout (default: none)
 ${extra.map((line) => `${line}\n`).join("")}  -h, --help                   Show this help`;
 }
 
@@ -265,7 +266,7 @@ export function parseArguments(argv, activeBackend = backend) {
     includeWorking: false,
     background: false,
     wait: false,
-    timeoutMinutes: DEFAULT_TIMEOUT_MINUTES,
+    timeoutMinutes: null,
     waitMinutes: DEFAULT_WAIT_MINUTES
   };
   const positional = [];
@@ -349,8 +350,11 @@ export function parseArguments(argv, activeBackend = backend) {
   if (!activeBackend.effortLevels.includes(options.effort)) {
     throw new Error(`Unsupported effort "${options.effort}". Use ${activeBackend.effortLevels.join(", ")}.`);
   }
-  if (!Number.isFinite(options.timeoutMinutes) || options.timeoutMinutes <= 0) {
-    throw new Error("--timeout-minutes must be a positive number.");
+  if (
+    options.timeoutMinutes !== null &&
+    (!Number.isFinite(options.timeoutMinutes) || options.timeoutMinutes <= 0 || options.timeoutMinutes > MAX_TIMEOUT_MINUTES)
+  ) {
+    throw new Error(`--timeout-minutes must be a positive number no greater than ${MAX_TIMEOUT_MINUTES}; omit it for no time limit.`);
   }
   if (!Number.isFinite(options.waitMinutes) || options.waitMinutes <= 0) {
     throw new Error("--wait-minutes must be a positive number.");
@@ -1610,6 +1614,13 @@ function checkReviewerVersion(binary) {
 
 let activeReviewerChild = null;
 
+// Reviews have no deadline by default, so stopping one must not depend on the
+// reviewer honoring SIGTERM.
+function stopReviewer(child) {
+  child.kill("SIGTERM");
+  setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
+}
+
 async function invokeReviewer(root, job, session, onSpawn = () => {}, onConversation = () => {}) {
   const binary = reviewerBinary();
   const reviewerVersion = checkReviewerVersion(binary);
@@ -1626,7 +1637,6 @@ async function invokeReviewer(root, job, session, onSpawn = () => {}, onConversa
   if (capability !== "read-only") fs.mkdirSync(scratchDirectory(job), { recursive: true });
   const args = backend.buildArgs({ job, session, schema: REVIEW_SCHEMA, schemaPath, lastMessagePath, capability });
   const prompt = buildPrompt(job, session);
-  const timeoutMs = job.timeout_minutes * 60 * 1000;
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, {
       cwd: job.repo_root,
@@ -1676,9 +1686,9 @@ async function invokeReviewer(root, job, session, onSpawn = () => {}, onConversa
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
       if (!conversationReported) reportConversationEarly();
-      if (Buffer.byteLength(stdout) > MAX_OUTPUT_BYTES) {
+      if (!oversized && Buffer.byteLength(stdout) > MAX_OUTPUT_BYTES) {
         oversized = true;
-        child.kill("SIGTERM");
+        stopReviewer(child);
       }
     });
     child.stderr.on("data", (chunk) => {
@@ -1713,11 +1723,12 @@ async function invokeReviewer(root, job, session, onSpawn = () => {}, onConversa
       fail(error);
       return;
     }
-    timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
-    }, timeoutMs);
+    if (job.timeout_minutes) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        stopReviewer(child);
+      }, job.timeout_minutes * 60 * 1000);
+    }
     child.stdin.end(prompt);
   });
 }
@@ -2275,7 +2286,7 @@ function installCancellationHandlers(root, job) {
   let wasCancelled = false;
   const cancel = () => {
     wasCancelled = true;
-    if (activeReviewerChild) activeReviewerChild.kill("SIGTERM");
+    if (activeReviewerChild) stopReviewer(activeReviewerChild);
     job.status = "cancelled";
     job.error = "Cancelled by user.";
     job.pid = null;

@@ -11,6 +11,7 @@ if (args.includes("--version")) {
   process.stdout.write("codex-cli 0.153.4\n");
   process.exit(0);
 }
+if (process.env.FAKE_CODEX_IGNORE_SIGTERM === "1") process.on("SIGTERM", () => {});
 
 let input = "";
 for await (const chunk of process.stdin) input += chunk.toString();
@@ -30,6 +31,7 @@ if (logPath) {
   fs.appendFileSync(logPath, `${JSON.stringify({
     args,
     input,
+    pid: process.pid,
     cwd: process.cwd(),
     conversationId,
     model,

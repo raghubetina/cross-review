@@ -1,0 +1,10 @@
+{
+  "0.7.2": {
+    "codex-review": "fe76dc3eafbad8fb0a9652e8fceedc6a7811d1cb6dc7bc65c72af4fca2b73dd8",
+    "claude-review": "da75032100f304705985abb54e4b03fb37dc61d17a4f642097ba399f71b6efb9"
+  },
+  "0.7.3": {
+    "codex-review": "4bb2b51b56065d96f52cde37c5cfca36fbbc9c441ab068850d2177bd2367928b",
+    "claude-review": "eabbc3055fb28fb66168d572fc95adfd8a3b30755c53541efba95c6c980170ab"
+  }
+}

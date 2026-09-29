@@ -1,7 +1,7 @@
 ---
 name: codex-review
 description: Run Codex reviews from Claude Code with explicit working-tree, branch, commit, range, or whole-repository scopes; arbitrary repository paths; custom focus or follow-up feedback; persistent review threads that remember earlier findings and user decisions; and background job controls. Use when the user asks Codex to review code, wants a second opinion from Codex on changes, wants a re-review that does not repeat rejected findings, compares a branch to a base, reviews a commit or repository, or manages a running Codex review.
-argument-hint: "[working|branch <base>|commit <ref>|range <a>..<b>|repo|again|new|reset|status|result|cancel] [--background] [-- focus]"
+argument-hint: "[working|branch <base>|commit <ref>|range <a>..<b>|repo|again|new|reset|status|result|cancel] [--background] [--focus-file <path>] [-- focus]"
 allowed-tools: Bash(node *)
 ---
 
@@ -15,13 +15,14 @@ Run the bundled runtime once and return its stdout faithfully. Do not reproduce 
 node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" <arguments>
 ```
 
-If this skill was invoked as a slash command, its raw arguments are: `$ARGUMENTS`. Translate the user's natural request, or those raw arguments, into the runtime interface. Preserve custom focus and follow-up feedback exactly. Read [references/interface.md](references/interface.md) when scope or command mapping is unclear.
+If this skill was invoked as a slash command, its raw arguments are: `$ARGUMENTS`. Translate the user's natural request, or those raw arguments, into the runtime interface. Preserve custom focus and follow-up feedback exactly. When the user points to a file of focus text, such as a repository's review checklist, pass it with `--focus-file <path>` instead of pasting it; a relative path resolves against the current directory. Read [references/interface.md](references/interface.md) when scope or command mapping is unclear.
 
 Examples:
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" --background
 node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" branch main --background -- "Focus on tenant isolation"
+node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" range main..HEAD --background --focus-file docs/review-focus.md -- "Also check the importer"
 node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" again --background -- "I intentionally rejected the callback recommendation because it is public API"
 node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" --resume-session SESSION_ID range PRIOR_HEAD..HEAD --background -- "Verify the bounded fixes"
 node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" --dir /path/to/repo working --background
@@ -78,9 +79,10 @@ node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" status --dir /path/to/repo
   a transient change restored between samples cannot be detected. A background review may overlap work in another
   checkout.
 - Forward later user decisions as focus text so Codex receives them in its thread. When the user decides about a
-  specific finding, write it as `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`; the
-  runtime records the disposition before Codex runs and shows all prior findings and decisions to Codex in every
-  later round, including after a retired session.
+  specific finding, write it after `--` as `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or
+  `reopen F-...`, since the runtime never reads decisions from a focus file. The runtime records the disposition
+  before Codex runs and shows all prior findings and decisions to Codex in every later round, including after a
+  retired session.
 - Run reviews with `--background`. Claude Code's Bash tool has a hard per-call time limit, and a max-effort Codex
   review often runs longer than that; the background worker is detached from the shell and survives the end of the
   call and of the session. Use `--wait` on a review only when the user explicitly asks to block and the change is tiny.

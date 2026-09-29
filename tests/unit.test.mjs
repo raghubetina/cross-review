@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -16,6 +18,7 @@ import {
   parseArguments,
   parseDecisions,
   parseReviewerOutput,
+  readFocusFile,
   renderStructured,
   resolveFindingId,
   splitPatches,
@@ -267,6 +270,37 @@ test("backends own their effort levels and extra options", () => {
   assert.equal(parseArguments([], codexBackend).options.capability, "full");
   assert.equal(parseArguments(["--capability", "read-only"], claudeBackend).options.capability, "read-only");
   assert.throws(() => parseArguments(["--capability", "bogus"], codexBackend), /Unsupported capability/);
+});
+
+test("--focus-file resolves against the current directory and belongs to review actions", () => {
+  for (const backend of [codexBackend, claudeBackend]) {
+    assert.equal(parseArguments([], backend).options.focusFile, null);
+    assert.equal(parseArguments(["--focus-file", "docs/focus.md"], backend).options.focusFile, path.resolve("docs/focus.md"));
+    const again = parseArguments(["again", "--focus-file", "/elsewhere/focus.md", "--", "reject F-1a2b3c: no"], backend);
+    assert.equal(again.options.focusFile, "/elsewhere/focus.md");
+    assert.equal(again.focus, "reject F-1a2b3c: no");
+    assert.throws(() => parseArguments(["--focus-file", "a.md", "--focus-file", "b.md"], backend), /--focus-file can be given only once/);
+    assert.throws(() => parseArguments(["--focus-file"], backend), /--focus-file requires a value/);
+    for (const action of ["status", "result", "cite", "cancel", "reset"]) {
+      assert.throws(() => parseArguments([action, "--focus-file", "a.md"], backend), new RegExp(`${action} does not accept --focus-file`));
+    }
+  }
+});
+
+test("readFocusFile returns the text with its SHA-256 and names a file it cannot read", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "focus-file-"));
+  const file = path.join(directory, "focus.md");
+  const text = "Check claims this change makes false.\n";
+  fs.writeFileSync(file, text, "utf8");
+  assert.deepEqual(readFocusFile(file), {
+    path: file,
+    sha256: crypto.createHash("sha256").update(text).digest("hex"),
+    bytes: Buffer.byteLength(text),
+    text
+  });
+  const missing = path.join(directory, "missing.md");
+  assert.throws(() => readFocusFile(missing), { message: `Cannot read --focus-file ${missing}: no such file.` });
+  assert.throws(() => readFocusFile(directory), { message: `Cannot read --focus-file ${directory}: it is a directory.` });
 });
 
 for (const B of BACKENDS) {

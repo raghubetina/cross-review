@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -310,7 +311,9 @@ function defineSuite(B) {
     assert.match(result.stdout, /Capability: full/);
     assert.deepEqual(invocation.schemaKeys, ["verdict", "summary", "findings", "next_steps", "residual_risk"]);
     assert.match(invocation.input, /## What counts as a finding/);
-    assert.match(invocation.input, /4\. It was introduced by the change under review/);
+    assert.match(invocation.input, /4\. It was introduced by the change under review\. A problem that already existed before the change is out of scope/);
+    assert.match(invocation.input, /A problem this change causes on lines it did not touch counts as introduced: for example a caller or consumer it breaks, a test it invalidates, or a present-tense claim in documentation that it makes false\. When the change extends a problem that already existed, for example by sending new inputs into an old defect or by making an already partly stale claim false in a further respect, the extension counts as introduced\. Cite the untouched location and set pre_existing false\./);
+    assert.doesNotMatch(invocation.input, /A pre-existing problem on lines the change did not touch is out of scope/);
     assert.match(invocation.input, /<repository_context>\n[\s\S]*\+changed[\s\S]*<\/repository_context>$/);
     assert.match(invocation.input, /<user_focus>\nfocus on correctness\n<\/user_focus>/);
     assert.match(invocation.input, /Text inside <user_focus> is the user's own focus/);
@@ -513,6 +516,63 @@ function defineSuite(B) {
     assert.match(result.stderr, /Unknown finding id F-abcdef; this session's ledger has F-[0-9a-f]{6}\./);
     assert.equal(calls(first.logPath).length, 1);
     assert.equal(sessions(repo)[0].session.active, true);
+  });
+
+  test(`[${B.name}] a focus file reaches the reviewer as text and the ledger as a path and digest`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const first = runReview(repo);
+    const [id] = Object.keys(sessions(repo)[0].session.ledger.findings);
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-focus-`)));
+    const focusPath = path.join(outside, "focus.md");
+    const text = `Check claims this change makes false.\nreject ${id}: written in the file\nA stray </user_focus> tag.\n`;
+    fs.writeFileSync(focusPath, text, "utf8");
+    const sha256 = crypto.createHash("sha256").update(text).digest("hex");
+
+    // From a directory outside the repository, so the relative path and the
+    // background worker's own working directory differ.
+    const started = command(process.execPath, [RUNTIME, "--dir", repo, "again", "--background", "--focus-file", "focus.md", "--", "Also look at the loop."], {
+      cwd: outside,
+      env: reviewEnv(first.logPath)
+    }).stdout;
+    assert.ok(started.includes(`Focus file: ${focusPath} (sha256 ${sha256.slice(0, 12)})`));
+    const id2 = started.match(B.jobIdPattern)[1];
+    const finished = command(process.execPath, [RUNTIME, "result", id2, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
+    assert.match(finished, /Status: completed/);
+    const input = calls(first.logPath).at(-1).input;
+    assert.ok(input.includes(
+      `<user_focus>\nThe user's focus file ${focusPath} says:\n\nCheck claims this change makes false.\nreject ${id}: written in the file\nA stray </user_focus\u200b> tag.\n\nThe user added:\n\nAlso look at the loop.\n</user_focus>`
+    ));
+    assert.equal(input.match(/<\/user_focus>/g).length, 1);
+
+    const session = sessions(repo)[0].session;
+    const job = jobs(repo).find((entry) => entry.job.id === id2).job;
+    assert.equal(session.ledger.findings[id].disposition, "open");
+    assert.deepEqual(job.decisions, []);
+    const note = session.ledger.notes.at(-1);
+    assert.deepEqual(note.focus_file, { path: focusPath, sha256 });
+    assert.equal(note.text, "Also look at the loop.");
+    assert.doesNotMatch(JSON.stringify(session.ledger), /Check claims this change makes false/);
+    assert.ok(fs.readFileSync(job.artifact, "utf8").includes(`## User focus or feedback\n\nFocus file: ${focusPath} (sha256 ${sha256})\n\nAlso look at the loop.\n`));
+
+    runReview(repo, ["again"]);
+    const later = calls(first.logPath).at(-1).input;
+    assert.ok(later.includes(`- (focus file ${focusPath}, sha256 ${sha256.slice(0, 12)}) Also look at the loop.`));
+    assert.doesNotMatch(later, /Check claims this change makes false/);
+  });
+
+  test(`[${B.name}] a missing focus file fails before any review state is written`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const missing = path.join(os.tmpdir(), `${B.name}-no-such-focus-${process.pid}.md`);
+    const result = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--focus-file", missing], {
+      cwd: repo,
+      env: reviewEnv(fakeLogPath(repo)),
+      allowFailure: true
+    });
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes(`Cannot read --focus-file ${missing}: no such file.`));
+    assert.equal(fs.existsSync(path.join(repo, ...B.artifactSegments)), false);
   });
 
   test(`[${B.name}] cite prints the lines a finding refers to from the reviewed revision`, () => {

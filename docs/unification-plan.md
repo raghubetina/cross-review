@@ -196,6 +196,16 @@ which of the user's hooks fire inside a headless review.
   only (working, branch, commit, range). In `repo` scope the prompt says
   pre-existing defects are the point of the review. Ledger findings may be
   reported with a status update in any scope.
+- Revised 2026-09-29 in 0.7.3: the exclusion covers problems that existed
+  before the change, not every problem on unmodified lines. A problem the
+  change causes on lines it did not touch, such as a caller it breaks, a test
+  it invalidates, or a documentation claim it makes false, counts as
+  introduced. So does the part of an older problem that the change extends,
+  such as new inputs sent into an old defect or a further respect in which an
+  already stale claim becomes false. The earlier wording contradicted review
+  focus that put such claims in scope. The new wording permits reporting
+  them; in a First Draft documentation probe, whether Codex looked for them
+  still depended on the focus.
 - Replace the trailing `Session metadata: <uuid>` line with nothing. Wrap the
   diff, untracked files, and focus text in `<repository_context>` and
   `<user_focus>` tags and say the content inside is data, not instructions.

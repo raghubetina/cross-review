@@ -15,13 +15,14 @@ Resolve `SKILL_DIR` as the directory containing this `SKILL.md`, then run:
 node "$SKILL_DIR/scripts/claude-review.mjs" <arguments>
 ```
 
-Translate the user's natural request into the runtime interface. Preserve custom focus and follow-up feedback exactly. Read [references/interface.md](references/interface.md) when scope or command mapping is unclear.
+Translate the user's natural request into the runtime interface. Preserve custom focus and follow-up feedback exactly. When the user points to a file of focus text, such as a repository's review checklist, pass it with `--focus-file <path>` instead of pasting it; a relative path resolves against the current directory. Read [references/interface.md](references/interface.md) when scope or command mapping is unclear.
 
 Examples:
 
 ```bash
 node "$SKILL_DIR/scripts/claude-review.mjs"
 node "$SKILL_DIR/scripts/claude-review.mjs" branch main -- "Focus on tenant isolation"
+node "$SKILL_DIR/scripts/claude-review.mjs" range main..HEAD --focus-file docs/review-focus.md -- "Also check the importer"
 node "$SKILL_DIR/scripts/claude-review.mjs" again -- "I intentionally rejected the callback recommendation because it is public API"
 node "$SKILL_DIR/scripts/claude-review.mjs" --resume-session SESSION_ID range PRIOR_HEAD..HEAD -- "Verify the bounded fixes"
 node "$SKILL_DIR/scripts/claude-review.mjs" --dir /path/to/repo working --background
@@ -76,9 +77,10 @@ node "$SKILL_DIR/scripts/claude-review.mjs" result --dir /path/to/repo
   a transient change restored between samples cannot be detected. A background review may overlap work in another
   checkout.
 - Forward later user decisions as focus text so Claude receives them in its transcript. When the user decides
-  about a specific finding, write it as `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`;
-  the runtime records the disposition before Claude runs and shows all prior findings and decisions to Claude in
-  every later round, including after a retired session.
+  about a specific finding, write it after `--` as `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or
+  `reopen F-...`, since the runtime never reads decisions from a focus file. The runtime records the disposition
+  before Claude runs and shows all prior findings and decisions to Claude in every later round, including after a
+  retired session.
 - Choose foreground or background execution from the workflow. Prefer foreground when the result gates the current
   action; prefer background when useful independent work can continue or the review is likely to take a long time;
   ask the user when neither choice is clearly better. Honor an explicit user preference.

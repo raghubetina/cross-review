@@ -49,10 +49,23 @@ claude-review.mjs again -- The callback API is intentionally retained for compat
 
 The runtime also accepts trailing focus text without `--` when unambiguous.
 
+To add a file's text to the focus, such as a repository's review checklist, pass `--focus-file <path>`:
+
+```text
+claude-review.mjs range main..HEAD --focus-file docs/review-focus.md -- Also check the importer
+```
+
+The runtime reads the file on the host when it prepares the review. A relative path resolves against the current
+directory, not `--dir`, and the file may live outside the reviewed repository. A missing or unreadable file fails
+before anything is recorded. The reviewer sees the file's text first, labeled with its path, then the `--` text.
+The session ledger records the file's path and SHA-256, not its text, and decisions are parsed only from the `--`
+text, so a focus file cannot record one. Pass `--focus-file` again on each round that should include it.
+
 ## Options
 
 ```text
 --dir <path>                 target another repository
+--focus-file <path>          add a file's text to the review focus; see above
 --resume-session <id>        resume this repository's prior active session
 --model <model>              explicitly select and persist a model for this session
 --effort <level>             low, medium, high, xhigh, or max; default max
@@ -100,15 +113,16 @@ steps and residual risk. The ids are recorded in the session ledger inside `sess
 
 ## Decisions
 
-A decision is your verdict on a finding, written at the start of a sentence or line in the focus text as `reject F-1a2b3c: reason`,
-`accept F-...`, `defer F-...`, or `reopen F-...`. The runtime records it on the finding before the reviewer starts,
-so it survives a review that fails or a session that retires, and shows every prior finding with its observation,
-disposition, and decision to the reviewer in each later round. A rejected finding can only come back as a
-reopen proposal with new evidence; reviewer output never changes a disposition. A decision on an id the session
-does not know fails before the reviewer runs. When a retired session is replaced, or the branch history is rewritten
-under an active session, the new session inherits the ledger and says so; `new` starts without it. An id printed
-with a `resembles` flag folds into the earlier finding before the next round and stays usable as an alias, unless
-you have already decided on the earlier finding, in which case both stay separate for you to decide.
+A decision is your verdict on a finding, written at the start of a sentence or line in the `--` focus text as
+`reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`; a focus file's text is never read for
+decisions. The runtime records it on the finding before the reviewer starts, so it survives a review that fails or a
+session that retires, and shows every prior finding with its observation, disposition, and decision to the reviewer
+in each later round. A rejected finding can only come back as a reopen proposal with new evidence; reviewer output
+never changes a disposition. A decision on an id the session does not know fails before the reviewer runs. When a
+retired session is replaced, or the branch history is rewritten under an active session, the new session inherits
+the ledger and says so; `new` starts without it. An id printed with a `resembles` flag folds into the earlier
+finding before the next round and stays usable as an alias, unless you have already decided on the earlier finding,
+in which case both stay separate for you to decide.
 
 ## Job controls
 
@@ -142,6 +156,7 @@ them.
 - “Review it again” → `again`
 - “Continue session X over only these fixes” → `--resume-session X range PRIOR_HEAD..HEAD`
 - “Reject finding F-1a2b3c, it is intentional” → `again -- reject F-1a2b3c: intentional`
+- “Use the checklist in docs/review-focus.md” → add `--focus-file docs/review-focus.md`
 - “Start over with Claude” → `new`
 - “Forget that review thread” → `reset`
 - “Run it while we keep working” → `--background`

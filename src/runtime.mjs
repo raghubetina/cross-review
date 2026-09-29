@@ -152,7 +152,7 @@ export function consolidateLedger(ledger) {
   return changed;
 }
 
-function applyDecisions(session, focus, jobIdValue) {
+function applyDecisions(session, focus, jobIdValue, focusFile = null) {
   session.ledger = session.ledger ?? { findings: {}, notes: [] };
   const decisions = parseDecisions(focus).map((decision) => ({ ...decision, id: resolveFindingId(session.ledger, decision.id) }));
   const findings = session.ledger.findings;
@@ -168,11 +168,33 @@ function applyDecisions(session, focus, jobIdValue) {
     findings[decision.id].disposition = decision.disposition;
     findings[decision.id].decision = { text: decision.text, job_id: jobIdValue, at };
   }
-  if (focus) {
+  if (focus || focusFile) {
     session.ledger.notes = session.ledger.notes ?? [];
-    session.ledger.notes.push({ text: focus, job_id: jobIdValue, at });
+    const note = { text: focus, job_id: jobIdValue, at };
+    if (focusFile) note.focus_file = { path: focusFile.path, sha256: focusFile.sha256 };
+    session.ledger.notes.push(note);
   }
   return decisions;
+}
+
+// A focus file is read once, on the host, while the review is prepared, and
+// its text is carried on the job so a background worker needs no access to
+// it. Decisions are parsed only from inline focus, so a committed focus file
+// cannot record one.
+export function readFocusFile(filePath) {
+  let buffer;
+  try {
+    buffer = fs.readFileSync(filePath);
+  } catch (error) {
+    const reason = { ENOENT: "no such file", EISDIR: "it is a directory", EACCES: "permission denied" }[error.code] ?? error.message;
+    throw new Error(`Cannot read --focus-file ${filePath}: ${reason}.`, { cause: error });
+  }
+  return {
+    path: filePath,
+    sha256: crypto.createHash("sha256").update(buffer).digest("hex"),
+    bytes: buffer.length,
+    text: buffer.toString("utf8")
+  };
 }
 
 export const REVIEW_SCHEMA = {
@@ -234,6 +256,7 @@ Usage:
 
 Options:
   --dir <path>                 Target repository (default: current directory)
+  --focus-file <path>          Add this file's text to the review focus
   --resume-session <id>        Resume this repository's prior active session
   --model <model>              Explicit ${activeBackend.reviewerLabel} model override
   --effort <level>             ${activeBackend.effortLevels.join("|")} (default: ${activeBackend.defaultEffort})
@@ -258,6 +281,7 @@ export function parseArguments(argv, activeBackend = backend) {
   const extraOptions = activeBackend.extraOptions ?? {};
   const options = {
     dir: process.cwd(),
+    focusFile: null,
     resumeSessionId: null,
     model: null,
     effort: activeBackend.defaultEffort,
@@ -284,6 +308,12 @@ export function parseArguments(argv, activeBackend = backend) {
     }
     if (argument === "--dir") {
       options.dir = takeValue(argv, index, argument);
+      index += 1;
+      continue;
+    }
+    if (argument === "--focus-file") {
+      if (options.focusFile) throw new Error("--focus-file can be given only once.");
+      options.focusFile = path.resolve(takeValue(argv, index, argument));
       index += 1;
       continue;
     }
@@ -407,6 +437,9 @@ export function parseArguments(argv, activeBackend = backend) {
   }
   if (["status", "result", "cite", "cancel", "reset", "help"].includes(action) && focus) {
     throw new Error(`${action} does not accept review focus text.`);
+  }
+  if (["status", "result", "cite", "cancel", "reset", "help"].includes(action) && options.focusFile) {
+    throw new Error(`${action} does not accept --focus-file.`);
   }
   if (["status", "result", "cite", "cancel", "reset"].includes(action) && options.background) {
     throw new Error(`${action} does not accept --background.`);
@@ -939,7 +972,7 @@ function jobId() {
   return `review-${Date.now().toString(36)}-${crypto.randomBytes(3).toString("hex")}`;
 }
 
-async function prepareJob(parsed, repoRoot, root) {
+async function prepareJob(parsed, repoRoot, root, focusFile = null) {
   return withLock(path.join(root, ".state.lock"), async () => {
     const branch = currentBranchIdentity(repoRoot);
     const preparedHead = headCommit(repoRoot);
@@ -1105,8 +1138,8 @@ async function prepareJob(parsed, repoRoot, root) {
       );
     }
     const id = jobId();
-    const decisions = applyDecisions(entry.session, parsed.focus, id);
-    if (decisions.length || parsed.focus) saveSession(entry.directory, entry.session);
+    const decisions = applyDecisions(entry.session, parsed.focus, id, focusFile);
+    if (decisions.length || parsed.focus || focusFile) saveSession(entry.directory, entry.session);
     const job = {
       version: STATE_VERSION,
       id,
@@ -1125,6 +1158,7 @@ async function prepareJob(parsed, repoRoot, root) {
       explicit_resume: explicitlySelected,
       scope,
       focus: parsed.focus,
+      focus_file: focusFile,
       decisions,
       inherited_findings: inheritedFindings,
       model: parsed.options.model ?? entry.session.explicit_model ?? null,
@@ -1491,7 +1525,10 @@ function priorFindingsSection(session) {
   };
   const open = findings.filter(([, entry]) => entry.observation !== "fixed").map(line);
   const resolved = findings.filter(([, entry]) => entry.observation === "fixed").map(line);
-  const notes = (session.ledger.notes ?? []).slice(-10).map((note) => `- ${note.text}`);
+  const notes = (session.ledger.notes ?? []).slice(-10).map((note) => {
+    const file = note.focus_file ? `(focus file ${note.focus_file.path}, sha256 ${note.focus_file.sha256.slice(0, 12)})` : "";
+    return `- ${[file, note.text].filter(Boolean).join(" ")}`;
+  });
   while (notes.length && Buffer.byteLength(notes.join("\n")) > MAX_NOTE_BYTES) notes.shift();
   return `## Prior findings and decisions
 
@@ -1505,7 +1542,7 @@ ${open.length ? open.join("\n") : "- (none still open)"}${resolved.length ? `\n\
 function reviewRubric(job, session) {
   const changeScope = job.scope.kind !== "repo";
   const introducedRule = changeScope
-    ? "4. It was introduced by the change under review. A pre-existing problem on lines the change did not touch is out of scope; mention one only in residual_risk, and only when it makes this change riskier."
+    ? "4. It was introduced by the change under review. A problem that already existed before the change is out of scope; mention one only in residual_risk, and only when it makes this change riskier. A problem this change causes on lines it did not touch counts as introduced: for example a caller or consumer it breaks, a test it invalidates, or a present-tense claim in documentation that it makes false. When the change extends a problem that already existed, for example by sending new inputs into an old defect or by making an already partly stale claim false in a further respect, the extension counts as introduced. Cite the untouched location and set pre_existing false."
     : "4. In repository scope there is no change under review, so pre-existing defects are the point: report them like any other finding and mark pre_existing true.";
   return `## What counts as a finding
 
@@ -1517,10 +1554,10 @@ Report something only when all of these hold:
 ${introducedRule}
 5. The author would want to know and would likely fix it.
 6. It does not rest on unstated assumptions about the codebase or the author's intent.
-7. Speculation that a change might disrupt something else is not enough; name the code that is provably affected.
+7. Speculation that a change might disrupt something else is not enough; name the code or documentation that is provably affected.
 8. It is clearly not an intentional choice by the author.
 
-Do not report: anything a linter, type checker, or compiler would catch; pedantic nits a senior engineer would not raise; general wishes for more tests, docs, or cleanliness unless the repository's own conventions require them; changes that are plainly intentional or follow directly from the broader change; anything you could not ground in code you inspected.
+Do not report: anything a linter, type checker, or compiler would catch; pedantic nits a senior engineer would not raise; general wishes for more tests, docs, or cleanliness unless the repository's own conventions require them; changes that are plainly intentional or follow directly from the broader change; anything you could not ground in files you inspected.
 
 ## Severity
 
@@ -1556,8 +1593,12 @@ function buildPrompt(job, session) {
   const resumed = job.resumed
     ? `This continues an existing review conversation. Re-review the current repository state for the resolved scope below. Use earlier findings and user decisions in this conversation as context. Verify which earlier findings remain, which were fixed, and which the user intentionally rejected. Do not repeat a rejected finding unless new evidence materially changes it; explain that new evidence.`
     : `This is the first review in a persistent review conversation.`;
-  const focus = job.focus
-    ? `\n<user_focus>\n${job.focus}\n</user_focus>\nWeight the user's focus heavily while still reporting other material defects.`
+  const focusText = job.focus_file
+    ? `The user's focus file ${job.focus_file.path} says:\n\n${job.focus_file.text.trimEnd()}${job.focus ? `\n\nThe user added:\n\n${job.focus}` : ""}`
+    : job.focus;
+  // A focus file may be a repository file, so its text must not close the block early.
+  const focus = focusText
+    ? `\n<user_focus>\n${focusText.replaceAll("</user_focus>", "</user_focus\u200b>")}\n</user_focus>\nWeight the user's focus heavily while still reporting other material defects.`
     : "";
 
   return `You are performing a software review from repository root:\n${job.repo_root}\n\n${resumed}
@@ -1921,7 +1962,7 @@ ${JSON.stringify(job.scope, null, 2)}
 
 ## User focus or feedback
 
-${job.focus || "(none)"}
+${[job.focus_file ? `Focus file: ${job.focus_file.path} (sha256 ${job.focus_file.sha256})` : "", job.focus].filter(Boolean).join("\n\n") || "(none)"}
 ${job.decisions?.length ? `\n## Decisions recorded\n\n${job.decisions.map((decision) => `- ${decision.id}: ${decision.disposition}${decision.text ? ` — ${decision.text}` : ""}`).join("\n")}\n` : ""}
 ${body}
 `;
@@ -2235,6 +2276,7 @@ function renderJob(root, job, includeResult = false) {
       `Notice: Previous session ${job.started_after_rewrite_session_id} ended because the branch history no longer continues from its last reviewed HEAD; this review started a new session.${inherited}`
     );
   }
+  if (job.focus_file) lines.push(`Focus file: ${job.focus_file.path} (sha256 ${job.focus_file.sha256.slice(0, 12)})`);
   if (job.decisions?.length) {
     lines.push(`Decisions: ${job.decisions.map((decision) => `${decision.id} ${decision.disposition}${decision.text ? ` (${decision.text})` : ""}`).join("; ")}`);
   }
@@ -2495,6 +2537,7 @@ export async function main(activeBackend, scriptPath, argv = process.argv.slice(
     process.stdout.write(`${usage()}\n`);
     return;
   }
+  const focusFile = parsed.options.focusFile ? readFocusFile(parsed.options.focusFile) : null;
   const repoRoot = resolveRepository(parsed.options.dir);
   const root = ensureArtifactRoot(repoRoot);
 
@@ -2524,7 +2567,7 @@ export async function main(activeBackend, scriptPath, argv = process.argv.slice(
     return;
   }
 
-  const job = await prepareJob(parsed, repoRoot, root);
+  const job = await prepareJob(parsed, repoRoot, root, focusFile);
   if (parsed.options.background) {
     const started = startBackground(root, job);
     process.stdout.write(`${renderJob(root, started)}\nUse status or result with this job ID.\n`);

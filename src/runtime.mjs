@@ -2213,6 +2213,9 @@ async function executeJob(root, job) {
       job.status = cancelled ? "cancelled" : "failed";
       job.completed_at = new Date().toISOString();
       job.error = persistedError;
+      // A numbered artifact written before the failure still reads as
+      // completed, so record it as dead-worker recovery does.
+      if (job.artifact && fs.existsSync(job.artifact)) job.unapplied_artifact = job.artifact;
       job.artifact = failedArtifact;
       job.pid = null;
       saveJob(root, job);

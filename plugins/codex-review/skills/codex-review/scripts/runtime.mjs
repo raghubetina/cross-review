@@ -972,6 +972,35 @@ function jobId() {
   return `review-${Date.now().toString(36)}-${crypto.randomBytes(3).toString("hex")}`;
 }
 
+// Settles a job whose worker died from what its session recorded: completed
+// if the session applied the job's result, otherwise failed with its round
+// output set aside, retiring the session if the reviewer had started.
+// Returns whether it retired the session.
+function recoverDeadWorkerJob(root, entry, job) {
+  const resultWasApplied = entry.session.last_applied_job_id === job.id;
+  job.status = resultWasApplied ? "completed" : "failed";
+  job.completed_at = resultWasApplied
+    ? job.completed_at ?? entry.session.last_reviewed_at ?? new Date().toISOString()
+    : new Date().toISOString();
+  job.error = resultWasApplied ? null : "The review worker exited before recording a terminal result.";
+  job.recovery_note = resultWasApplied
+    ? "Recovered the completed job from the session's applied-result marker."
+    : null;
+  if (!resultWasApplied) {
+    job.unapplied_artifact = job.artifact ?? null;
+    job.artifact = null;
+    job.rendered_result = null;
+    job.result_summary = null;
+  }
+  job.pid = null;
+  saveJob(root, job);
+  if (!job.reviewer_started_at || resultWasApplied) return false;
+  retireSessionAfterUnappliedInvocation(entry.directory, entry.session, job.id, job.checkout_identity ?? null);
+  job.error = `${job.error} ${retiredSessionGuidanceText()}`;
+  saveJob(root, job);
+  return true;
+}
+
 async function prepareJob(parsed, repoRoot, root, focusFile = null) {
   return withLock(path.join(root, ".state.lock"), async () => {
     const branch = currentBranchIdentity(repoRoot);
@@ -1046,28 +1075,8 @@ async function prepareJob(parsed, repoRoot, root, focusFile = null) {
         const ageMs = Date.now() - Date.parse(existingJob.updated_at ?? existingJob.created_at ?? 0);
         const staleBeforePid = existingJob.status === "queued" && !existingJob.pid && ageMs > 5_000;
         if ((existingJob.pid && !processAlive(existingJob.pid)) || staleBeforePid) {
-          const resultWasApplied = entry.session.last_applied_job_id === existingJob.id;
-          existingJob.status = resultWasApplied ? "completed" : "failed";
-          existingJob.completed_at = resultWasApplied
-            ? existingJob.completed_at ?? entry.session.last_reviewed_at ?? new Date().toISOString()
-            : new Date().toISOString();
-          existingJob.error = resultWasApplied ? null : "The review worker exited before recording a terminal result.";
-          existingJob.recovery_note = resultWasApplied
-            ? "Recovered the completed job from the session's applied-result marker."
-            : null;
-          if (!resultWasApplied) {
-            existingJob.unapplied_artifact = existingJob.artifact ?? null;
-            existingJob.artifact = null;
-            existingJob.rendered_result = null;
-            existingJob.result_summary = null;
-          }
-          existingJob.pid = null;
-          saveJob(root, existingJob);
-          if (existingJob.reviewer_started_at && !resultWasApplied) {
+          if (recoverDeadWorkerJob(root, entry, existingJob)) {
             const retiredSessionId = entry.session.session_id;
-            retireSessionAfterUnappliedInvocation(entry.directory, entry.session, existingJob.id, existingJob.checkout_identity ?? null);
-            existingJob.error = `${existingJob.error} ${retiredSessionGuidanceText()}`;
-            saveJob(root, existingJob);
             retiredEntry = {
               directory: entry.directory,
               session: readJson(path.join(entry.directory, "session.json"))
@@ -2507,6 +2516,16 @@ function resetSession(root, repoRoot) {
 function cancelJob(root, selected) {
   if (!["queued", "running"].includes(selected.status)) {
     return `Job ${selected.id} is already ${selected.status}.`;
+  }
+  // A dead worker never ran its own cleanup, so settle the job as the next
+  // review's recovery would instead of marking it cancelled.
+  const entry = selected.pid && !processAlive(selected.pid)
+    ? loadSessions(root).find(({ directory }) => directory === selected.task_directory)
+    : null;
+  if (entry) {
+    recoverDeadWorkerJob(root, entry, selected);
+    const detail = selected.error ?? selected.recovery_note;
+    return `Job ${selected.id} had already stopped and is now ${selected.status}.${detail ? ` ${detail}` : ""}`;
   }
   if (selected.pid) {
     try {

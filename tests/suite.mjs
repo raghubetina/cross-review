@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import claudeBackend from "../src/backends/claude.mjs";
 import codexBackend from "../src/backends/codex.mjs";
@@ -23,6 +23,7 @@ import {
 } from "../src/runtime.mjs";
 
 const TEST_ROOT = path.dirname(fileURLToPath(import.meta.url));
+const KILL_BEFORE_APPLY = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/kill-before-apply.mjs")).href;
 
 const BACKENDS = [
   {
@@ -1520,6 +1521,73 @@ function defineSuite(B) {
     const recovered = JSON.parse(fs.readFileSync(completed.path, "utf8"));
     assert.equal(recovered.status, "completed");
     assert.match(recovered.recovery_note, /applied-result marker/);
+  });
+
+  test(`[${B.name}] cancelling a job whose worker died before applying its round recovers it`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const logPath = fakeLogPath(repo);
+    const killed = command(process.execPath, ["--import", KILL_BEFORE_APPLY, RUNTIME, "--dir", repo, "working"], {
+      cwd: repo,
+      env: reviewEnv(logPath),
+      allowFailure: true,
+      timeout: 30_000
+    });
+    assert.equal(killed.signal, "SIGKILL");
+    const { path: jobFile, job: interrupted } = jobs(repo)[0];
+    assert.equal(interrupted.status, "running");
+    assert.ok(interrupted.reviewer_started_at);
+    assert.ok(interrupted.rendered_result);
+    assert.ok(fs.existsSync(interrupted.artifact));
+
+    const cancelled = command(process.execPath, [RUNTIME, "cancel", interrupted.id, "--dir", repo]).stdout;
+    const recovered = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+    assert.equal(recovered.status, "failed");
+    assert.match(recovered.error, /^The review worker exited before recording a terminal result\. .*session was retired/);
+    assert.equal(recovered.pid, null);
+    assert.equal(recovered.unapplied_artifact, interrupted.artifact);
+    assert.equal(recovered.artifact, null);
+    assert.equal(recovered.result_summary, null);
+    assert.equal(recovered.rendered_result, null);
+    const retired = sessions(repo)[0].session;
+    assert.equal(retired.active, false);
+    assert.equal(retired.retired_job_id, interrupted.id);
+    assert.equal(retired.review_count, 0);
+    assert.match(cancelled, new RegExp(`Job ${interrupted.id} had already stopped and is now failed\\. The review worker exited`));
+
+    const again = command(process.execPath, [RUNTIME, "--dir", repo, "again"], {
+      cwd: repo,
+      env: reviewEnv(logPath),
+      allowFailure: true
+    });
+    assert.notEqual(again.status, 0);
+    assert.match(again.stderr, new RegExp(`previous ${B.label} review session.*retired`, "i"));
+    assert.equal(calls(logPath).length, 1);
+  });
+
+  test(`[${B.name}] cancelling a job whose worker died after applying its result records it completed`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const first = runReview(repo);
+    const accepted = sessions(repo)[0].session;
+    const completed = jobs(repo).find(({ job }) => job.id === accepted.last_applied_job_id);
+    assert.ok(completed);
+    completed.job.status = "running";
+    completed.job.pid = 2_147_483_647;
+    fs.writeFileSync(completed.path, `${JSON.stringify(completed.job)}\n`, "utf8");
+
+    const cancelled = command(process.execPath, [RUNTIME, "cancel", completed.job.id, "--dir", repo]).stdout;
+    const recovered = JSON.parse(fs.readFileSync(completed.path, "utf8"));
+    assert.equal(recovered.status, "completed");
+    assert.equal(recovered.error, null);
+    assert.equal(recovered.artifact, completed.job.artifact);
+    assert.match(recovered.recovery_note, /applied-result marker/);
+    assert.equal(sessions(repo)[0].session.active, true);
+    assert.match(cancelled, /had already stopped and is now completed\. Recovered the completed job/);
+
+    const resumed = runReview(repo, ["again"]);
+    assert.match(resumed.result.stdout, /Session: resumed/);
+    assert.ok(B.isResume(calls(first.logPath)[1].args));
   });
 
   test(`[${B.name}] legacy jobs recover a session ID only from a matching session inside the current artifact root`, () => {

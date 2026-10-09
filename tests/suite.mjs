@@ -24,6 +24,7 @@ import {
 
 const TEST_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const KILL_BEFORE_APPLY = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/kill-before-apply.mjs")).href;
+const FAIL_SESSION_AFTER_ARTIFACT = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/fail-session-after-artifact.mjs")).href;
 
 const BACKENDS = [
   {
@@ -1212,6 +1213,9 @@ function defineSuite(B) {
     assert.ok(artifactPath);
     assert.match(fs.readFileSync(artifactPath, "utf8"), /Review output \(not applied\)/);
     assert.match(fs.readFileSync(artifactPath, "utf8"), /Example defect/);
+    const failedJob = jobs(repo).find((entry) => entry.job.id === id).job;
+    assert.deepEqual(fs.readdirSync(failedJob.task_directory).filter((name) => name.startsWith("002-")), []);
+    assert.equal(failedJob.unapplied_artifact, undefined);
     const retired = sessions(repo)[0].session;
     assert.equal(retired.review_count, 1);
     assert.equal(retired.last_head, reviewed);
@@ -1440,6 +1444,29 @@ function defineSuite(B) {
     assert.equal(taskEntries.length, 2);
     assert.equal(taskEntries[1].session.active, true);
     assert.notEqual(taskEntries[1].session.conversation_id, taskEntries[0].session.conversation_id);
+  });
+
+  test(`[${B.name}] a round that fails after writing its artifact records it as unapplied`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const result = command(process.execPath, ["--import", FAIL_SESSION_AFTER_ARTIFACT, RUNTIME, "--dir", repo], {
+      cwd: repo,
+      env: reviewEnv(fakeLogPath(repo)),
+      allowFailure: true,
+      timeout: 30_000
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Simulated failure writing \S+\/session\.json .*session was retired/);
+    const { job } = jobs(repo)[0];
+    const written = path.join(job.task_directory, "001-working.md");
+    assert.match(fs.readFileSync(written, "utf8"), /^- Status: completed$/m);
+    assert.equal(job.status, "failed");
+    assert.equal(job.unapplied_artifact, written);
+    assert.equal(job.artifact, path.join(job.task_directory, "failed", `${job.id}.md`));
+    const retired = sessions(repo)[0].session;
+    assert.equal(retired.active, false);
+    assert.equal(retired.review_count, 0);
+    assert.equal(retired.retired_job_id, job.id);
   });
 
   test(`[${B.name}] an explicit resume refuses a stale session retired during preparation`, () => {

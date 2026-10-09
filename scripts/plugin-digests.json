@@ -10,5 +10,9 @@
   "0.7.4": {
     "codex-review": "bcc706313523f2f1fd58027b9c06a2b68a4e1d0b0cc8dfa8653a8252089aab89",
     "claude-review": "1ec5aa217985be1a359f94de1394fca73cba6911352df468da9d0a9da1201f08"
+  },
+  "0.7.5": {
+    "codex-review": "c87725ec6d59f0be28114b3b3351778d65d39c191b209a0fa2c4b41a836f0577",
+    "claude-review": "d515d21fb23279a2463818d2fd809fccff22d20be209ccf3ec1998797b815883"
   }
 }

@@ -6,5 +6,9 @@
   "0.7.3": {
     "codex-review": "4bb2b51b56065d96f52cde37c5cfca36fbbc9c441ab068850d2177bd2367928b",
     "claude-review": "eabbc3055fb28fb66168d572fc95adfd8a3b30755c53541efba95c6c980170ab"
+  },
+  "0.7.4": {
+    "codex-review": "bcc706313523f2f1fd58027b9c06a2b68a4e1d0b0cc8dfa8653a8252089aab89",
+    "claude-review": "1ec5aa217985be1a359f94de1394fca73cba6911352df468da9d0a9da1201f08"
   }
 }

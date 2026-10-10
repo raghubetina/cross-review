@@ -20,7 +20,7 @@ const valueAfter = (option) => {
   return index >= 0 ? args[index + 1] : null;
 };
 const resumed = args.includes("--resume");
-const conversationId = valueAfter("--resume") || valueAfter("--session-id") || "missing-session";
+const conversationId = process.env.FAKE_CLAUDE_CONVERSATION_ID || valueAfter("--resume") || valueAfter("--session-id") || "missing-session";
 const model = valueAfter("--model") || "claude-default";
 const schemaJson = valueAfter("--json-schema");
 const logPath = process.env.FAKE_CLAUDE_LOG;
@@ -91,6 +91,10 @@ if (process.env.FAKE_CLAUDE_NO_FINDINGS === "1") {
   structured.findings = [];
   structured.next_steps = [];
 }
+if (process.env.FAKE_CLAUDE_CHECKLIST_ITEMS) {
+  for (const finding of structured.findings) finding.checklist_items = process.env.FAKE_CLAUDE_CHECKLIST_ITEMS.split(",");
+}
+if (process.env.FAKE_CLAUDE_VERDICTS) structured.verdicts = JSON.parse(process.env.FAKE_CLAUDE_VERDICTS);
 
 process.stdout.write(`${JSON.stringify({
   type: "result",

@@ -21,7 +21,7 @@ const valueAfter = (option) => {
   return index >= 0 ? args[index + 1] : null;
 };
 const resumed = args[0] === "exec" && args[1] === "resume";
-const conversationId = resumed ? args[2] : crypto.randomUUID();
+const conversationId = process.env.FAKE_CODEX_CONVERSATION_ID || (resumed ? args[2] : crypto.randomUUID());
 const model = valueAfter("-m") || "codex-default";
 const outputPath = valueAfter("-o");
 const schemaPath = valueAfter("--output-schema");
@@ -98,6 +98,10 @@ if (process.env.FAKE_CODEX_NO_FINDINGS === "1") {
   structured.findings = [];
   structured.next_steps = [];
 }
+if (process.env.FAKE_CODEX_CHECKLIST_ITEMS) {
+  for (const finding of structured.findings) finding.checklist_items = process.env.FAKE_CODEX_CHECKLIST_ITEMS.split(",");
+}
+if (process.env.FAKE_CODEX_VERDICTS) structured.verdicts = JSON.parse(process.env.FAKE_CODEX_VERDICTS);
 const text = JSON.stringify(structured);
 const events = [
   { type: "item.completed", item: { id: "item_0", type: "agent_message", text } },

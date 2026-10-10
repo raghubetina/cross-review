@@ -23,6 +23,7 @@ Examples:
 node "$SKILL_DIR/scripts/claude-review.mjs"
 node "$SKILL_DIR/scripts/claude-review.mjs" branch main -- "Focus on tenant isolation"
 node "$SKILL_DIR/scripts/claude-review.mjs" range main..HEAD --focus-file docs/review-focus.md -- "Also check the importer"
+node "$SKILL_DIR/scripts/claude-review.mjs" new repo --rubric-file audit/rubric.md --checklist-file audit/checklist.txt
 node "$SKILL_DIR/scripts/claude-review.mjs" again -- "I intentionally rejected the callback recommendation because it is public API"
 node "$SKILL_DIR/scripts/claude-review.mjs" --resume-session SESSION_ID range PRIOR_HEAD..HEAD -- "Verify the bounded fixes"
 node "$SKILL_DIR/scripts/claude-review.mjs" --dir /path/to/repo working --background
@@ -81,6 +82,16 @@ node "$SKILL_DIR/scripts/claude-review.mjs" result --dir /path/to/repo
   `reopen F-...`, since the runtime never reads decisions from a focus file. The runtime records the disposition
   before Claude runs and shows all prior findings and decisions to Claude in every later round, including after a
   retired session.
+- For an audit, such as a line-by-line review of generated code, pass `--rubric-file <path>` to replace the built-in
+  finding and severity rules and `--checklist-file <path>` to require one verdict per listed item. Pass them again on
+  every round that should use them; neither carries over. Start an audit with `new` to keep it separate from earlier
+  reviews, and start the next ordinary review with `new` too, since a plain round resumes the audit's conversation and
+  inherits its findings. A rubric must rate severity as `critical`, `high`, `medium`, and `low`. When a checklist
+  lists another reviewer's findings to confirm or refute, prefix their ids, for example `codex:F-1a2b3c`, so they are
+  not confused with this session's own ids. Relay the `Coverage:` line, every verdict other than `keep`, and the
+  coverage `Warning:` line verbatim, not every `keep`.
+  A prose review checklist is still focus text for `--focus-file`; use `--checklist-file` only for a list of
+  `<id> <description>` lines that should each get a verdict.
 - Choose foreground or background execution from the workflow. Prefer foreground when the result gates the current
   action; prefer background when useful independent work can continue or the review is likely to take a long time;
   ask the user when neither choice is clearly better. Honor an explicit user preference.

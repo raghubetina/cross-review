@@ -10,17 +10,23 @@ import claudeBackend from "../src/backends/claude.mjs";
 import codexBackend from "../src/backends/codex.mjs";
 import {
   REVIEW_SCHEMA,
+  checkCoverage,
+  checklistSection,
   consolidateLedger,
   containsSecret,
+  coverageWarning,
   likelySecretPath,
   redactSecrets,
   normalizeStructured,
   parseArguments,
+  parseChecklist,
   parseDecisions,
   parseReviewerOutput,
-  readFocusFile,
+  readOptionFile,
   renderStructured,
+  resolveChecklistLabel,
   resolveFindingId,
+  reviewSchema,
   splitPatches,
   validateBackend
 } from "../src/runtime.mjs";
@@ -272,35 +278,240 @@ test("backends own their effort levels and extra options", () => {
   assert.throws(() => parseArguments(["--capability", "bogus"], codexBackend), /Unsupported capability/);
 });
 
-test("--focus-file resolves against the current directory and belongs to review actions", () => {
+test("file options resolve against the current directory and belong to review actions", () => {
   for (const backend of [codexBackend, claudeBackend]) {
-    assert.equal(parseArguments([], backend).options.focusFile, null);
-    assert.equal(parseArguments(["--focus-file", "docs/focus.md"], backend).options.focusFile, path.resolve("docs/focus.md"));
-    const again = parseArguments(["again", "--focus-file", "/elsewhere/focus.md", "--", "reject F-1a2b3c: no"], backend);
-    assert.equal(again.options.focusFile, "/elsewhere/focus.md");
-    assert.equal(again.focus, "reject F-1a2b3c: no");
-    assert.throws(() => parseArguments(["--focus-file", "a.md", "--focus-file", "b.md"], backend), /--focus-file can be given only once/);
-    assert.throws(() => parseArguments(["--focus-file"], backend), /--focus-file requires a value/);
-    for (const action of ["status", "result", "cite", "cancel", "reset"]) {
-      assert.throws(() => parseArguments([action, "--focus-file", "a.md"], backend), new RegExp(`${action} does not accept --focus-file`));
+    for (const [option, key] of [["--focus-file", "focusFile"], ["--rubric-file", "rubricFile"], ["--checklist-file", "checklistFile"]]) {
+      assert.equal(parseArguments([], backend).options[key], null);
+      assert.equal(parseArguments([option, "docs/file.md"], backend).options[key], path.resolve("docs/file.md"));
+      const again = parseArguments(["again", option, "/elsewhere/file.md", "--", "reject F-1a2b3c: no"], backend);
+      assert.equal(again.options[key], "/elsewhere/file.md");
+      assert.equal(again.focus, "reject F-1a2b3c: no");
+      assert.throws(() => parseArguments([option, "a.md", option, "b.md"], backend), new RegExp(`${option} can be given only once`));
+      assert.throws(() => parseArguments([option], backend), new RegExp(`${option} requires a value`));
+      for (const action of ["status", "result", "cite", "cancel", "reset"]) {
+        assert.throws(() => parseArguments([action, option, "a.md"], backend), new RegExp(`${action} does not accept ${option}`));
+      }
     }
+    const audit = parseArguments(["repo", "--rubric-file", "r.md", "--checklist-file", "c.txt", "--focus-file", "f.md"], backend);
+    assert.deepEqual([audit.options.rubricFile, audit.options.checklistFile, audit.options.focusFile], ["r.md", "c.txt", "f.md"].map((file) => path.resolve(file)));
   }
 });
 
-test("readFocusFile returns the text with its SHA-256 and names a file it cannot read", () => {
+test("readOptionFile returns the text with its SHA-256 and names the option and a file it cannot read", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "focus-file-"));
   const file = path.join(directory, "focus.md");
   const text = "Check claims this change makes false.\n";
   fs.writeFileSync(file, text, "utf8");
-  assert.deepEqual(readFocusFile(file), {
+  assert.deepEqual(readOptionFile("--focus-file", file), {
     path: file,
     sha256: crypto.createHash("sha256").update(text).digest("hex"),
     bytes: Buffer.byteLength(text),
     text
   });
   const missing = path.join(directory, "missing.md");
-  assert.throws(() => readFocusFile(missing), { message: `Cannot read --focus-file ${missing}: no such file.` });
-  assert.throws(() => readFocusFile(directory), { message: `Cannot read --focus-file ${directory}: it is a directory.` });
+  assert.throws(() => readOptionFile("--focus-file", missing), { message: `Cannot read --focus-file ${missing}: no such file.` });
+  assert.throws(() => readOptionFile("--rubric-file", missing), { message: `Cannot read --rubric-file ${missing}: no such file.` });
+  assert.throws(() => readOptionFile("--checklist-file", directory), { message: `Cannot read --checklist-file ${directory}: it is a directory.` });
+});
+
+test("parseChecklist reads one id and description per line and names the line it rejects", () => {
+  assert.deepEqual(parseChecklist("# shapes\n\nshape:1 A guard clause\r\n  codex:F-1a2b3c   The divisor is unchecked  \n#not-an-item x\n", "c.txt"), [
+    { id: "shape:1", description: "A guard clause" },
+    { id: "codex:F-1a2b3c", description: "The divisor is unchecked" }
+  ]);
+  assert.throws(() => parseChecklist("a First\nb Second\na Again\n", "c.txt"), { message: "Invalid --checklist-file c.txt: line 3 repeats item a from line 1." });
+  assert.throws(() => parseChecklist("a First\nlonely\n", "c.txt"), { message: "Invalid --checklist-file c.txt: line 2 has an item id but no description." });
+  assert.throws(() => parseChecklist("# only a comment\n\n", "c.txt"), { message: "Invalid --checklist-file c.txt: it lists no items." });
+});
+
+test("reviewSchema adds verdicts and checklist links only for a checklist, with every property required", () => {
+  assert.equal(reviewSchema({}), REVIEW_SCHEMA);
+  const schema = reviewSchema({ checklist_file: { items: [{ id: "a", description: "x" }] } });
+  assert.notEqual(schema, REVIEW_SCHEMA);
+  assert.deepEqual(REVIEW_SCHEMA.required, ["verdict", "summary", "findings", "next_steps", "residual_risk"]);
+  assert.equal("checklist_items" in REVIEW_SCHEMA.properties.findings.items.properties, false);
+  assert.ok(schema.required.includes("verdicts"));
+  assert.ok(schema.properties.findings.items.required.includes("checklist_items"));
+  assert.deepEqual(schema.properties.verdicts.items.properties.verdict.enum, ["keep", "finding", "confirm", "refute", "not_applicable"]);
+  // Codex's --output-schema is strict: every object requires all of its properties.
+  const objects = [schema, schema.properties.findings.items, schema.properties.verdicts.items];
+  for (const object of objects) {
+    assert.deepEqual([...object.required].sort(), Object.keys(object.properties).sort());
+    assert.equal(object.additionalProperties, false);
+  }
+});
+
+test("checkCoverage maps findings to items after normalization and reports every gap", () => {
+  const items = ["a", "b", "c", "d", "e"].map((id) => ({ id, description: `item ${id}` }));
+  const base = { observation: "new", body: "b", file: "a.js", pre_existing: false, trigger: "", evidence: "", recommendation: "" };
+  const structured = normalizeStructured({
+    verdict: "needs-attention",
+    summary: "s",
+    findings: [
+      { ...base, id: null, severity: "low", title: "low", line_start: 1, line_end: 1, confidence: 0.5, checklist_items: ["b"] },
+      { ...base, id: null, severity: "high", title: "high", line_start: 2, line_end: 2, confidence: 0.9, checklist_items: ["a", "ghost"] },
+      { ...base, id: null, severity: "medium", title: "medium", line_start: 3, line_end: 3, confidence: 0.9, checklist_items: [] }
+    ],
+    verdicts: [
+      { item: "d", verdict: "finding", note: "never linked" },
+      { item: "a", verdict: "finding", note: "dead code" },
+      { item: "b", verdict: "keep", note: "but a finding links it" },
+      { item: "a", verdict: "keep", note: "second answer" },
+      { item: "zzz", verdict: "keep", note: "unlisted" }
+    ],
+    next_steps: [],
+    residual_risk: ""
+  }, { scope: { kind: "working" } }, {});
+  const [high, medium, low] = structured.findings;
+  assert.deepEqual([high.title, medium.title, low.title], ["high", "medium", "low"]);
+  const coverage = checkCoverage(structured, items);
+  assert.deepEqual(coverage.verdicts, [
+    { item: "a", description: "item a", verdict: "finding", finding_ids: [high.id], note: "dead code" },
+    { item: "b", description: "item b", verdict: "keep", finding_ids: [low.id], note: "but a finding links it" },
+    { item: "d", description: "item d", verdict: "finding", finding_ids: [], note: "never linked" }
+  ]);
+  assert.equal(coverage.items, 5);
+  assert.equal(coverage.answered, 3);
+  assert.deepEqual(coverage.counts, { keep: 1, finding: 2, confirm: 0, refute: 0, not_applicable: 0 });
+  assert.deepEqual(coverage.missing, ["c", "e"]);
+  assert.deepEqual(coverage.unknown, ["zzz", "ghost"]);
+  assert.deepEqual(coverage.duplicate, ["a"]);
+  assert.equal(coverage.normalized, 0);
+  assert.deepEqual(coverage.ambiguous, []);
+  assert.deepEqual(coverage.unlinked, ["d"]);
+  assert.deepEqual(coverage.inconsistent, ["b"]);
+  assert.deepEqual(coverage.unknown_verdicts, [{ item: "zzz", verdict: "keep", note: "unlisted" }]);
+  assert.equal(
+    coverageWarning(coverage),
+    "Checklist coverage is incomplete: no verdict for 2 of 5 items (c, e); verdicts or finding links for unknown items (zzz, ghost); " +
+      "more than one verdict for (a), so the first was kept; finding verdicts that no finding links to (d); " +
+      "findings linked to items marked keep or not_applicable (b)."
+  );
+
+  const degraded = checkCoverage(null, items);
+  assert.equal(degraded.answered, 0);
+  assert.deepEqual(degraded.verdicts, []);
+  assert.deepEqual(degraded.missing, ["a", "b", "c", "d", "e"]);
+  const complete = checkCoverage({ findings: [], verdicts: items.map((item) => ({ item: item.id, verdict: "keep", note: "" })) }, items);
+  assert.equal(coverageWarning(complete), null);
+  const many = Array.from({ length: 23 }, (_, index) => ({ id: `i${index}`, description: "x" }));
+  assert.match(coverageWarning(checkCoverage(null, many)), /no verdict for 23 of 23 items \(i0, i1, .*, i19, and 3 more\)\.$/);
+});
+
+test("checklistSection shows each id in backticks before its description and asks for bare ids", () => {
+  assert.equal(checklistSection({}), "");
+  const section = checklistSection({
+    checklist_file: { path: "c.txt", items: [{ id: "zero-guard", description: "The b === 0 check in divide" }, { id: "codex:F-1a2b3c", description: "The divisor is unchecked" }] }
+  });
+  assert.ok(section.includes("<review_checklist>\n- `zero-guard` — The b === 0 check in divide\n- `codex:F-1a2b3c` — The divisor is unchecked\n</review_checklist>"));
+  assert.ok(section.includes(
+    "lists 2 items, each shown below as its id in backticks, an em dash, and its description. Return exactly one entry in verdicts for each item, and no entry for anything else. " +
+      "verdicts[].item and findings[].checklist_items[] contain only an id, exactly as it appears between the backticks, never the backticks or the description."
+  ));
+  assert.doesNotMatch(section, /copied exactly as listed/);
+});
+
+test("resolveChecklistLabel prefers an exact id and otherwise reads a copied line as the longest id it starts with", () => {
+  const ids = new Set(["zero", "zero-guard", "fix", "fix—guard", "a", "a:"]);
+  const resolved = (label) => resolveChecklistLabel(label, ids);
+  const exact = (id) => ({ id, normalized: false, ambiguous: false });
+  const normalized = (id, ambiguous = false) => ({ id, normalized: true, ambiguous });
+  assert.deepEqual(resolved("zero-guard"), exact("zero-guard"));
+  assert.deepEqual(resolved("zero"), exact("zero"));
+  assert.deepEqual(resolved("a:"), exact("a:"));
+  assert.deepEqual(resolved("zero-guard: The b === 0 check in divide"), normalized("zero-guard"));
+  assert.deepEqual(resolved("zero-guard : The b === 0 check"), normalized("zero-guard"));
+  assert.deepEqual(resolved("zero-guard — The b === 0 check"), normalized("zero-guard"));
+  assert.deepEqual(resolved("zero-guard—The b === 0 check"), normalized("zero-guard"));
+  assert.deepEqual(resolved("zero-guard - The b === 0 check"), normalized("zero-guard"));
+  assert.deepEqual(resolved("zero-guard:"), normalized("zero-guard"));
+  assert.deepEqual(resolved("`zero-guard`"), normalized("zero-guard"));
+  assert.deepEqual(resolved("`zero-guard` — The b === 0 check"), normalized("zero-guard"));
+  assert.deepEqual(resolved("zero: the zero item"), normalized("zero"));
+  // Two ids qualify only when the longer one continues past a separator.
+  assert.deepEqual(resolved("fix—guard: The guard"), normalized("fix—guard", true));
+  assert.deepEqual(resolved("a:: the a-colon item"), normalized("a:"));
+  for (const unknown of ["zero-x", "zero-guards", "zero-guard:The", "`zero-guard", "zero-guard`", "- zero-guard: The check", "nothing", "", null]) {
+    assert.equal(resolved(unknown), null, String(unknown));
+  }
+});
+
+test("checkCoverage counts copied labels as normalized, rewrites finding links to ids, and warns only when a label is ambiguous", () => {
+  const items = [
+    { id: "zero-guard", description: "The b === 0 check in divide" },
+    { id: "empty-average", description: "average when values is empty" },
+    { id: "fix", description: "The fix" },
+    { id: "fix—guard", description: "The guarded fix" }
+  ];
+  const finding = {
+    id: "F-123abc", observation: "new", severity: "high", title: "Remove the zero guard", body: "Redundant.", file: "calc.js",
+    line_start: 2, line_end: 2, pre_existing: false, trigger: "", evidence: "", confidence: 0.9, recommendation: "Delete it.",
+    checklist_items: ["zero-guard: The b === 0 check in divide", "zero-guard", "ghost: not listed"]
+  };
+  const structured = {
+    verdict: "needs-attention",
+    summary: "s",
+    findings: [finding],
+    verdicts: [
+      { item: "zero-guard: The b === 0 check in divide", verdict: "finding", note: "redundant" },
+      { item: "`empty-average`", verdict: "keep", note: "NaN is fine" },
+      { item: "fix", verdict: "keep", note: "exact" },
+      { item: "fix—guard — The guarded fix", verdict: "keep", note: "needed" }
+    ],
+    next_steps: [],
+    residual_risk: ""
+  };
+  const coverage = checkCoverage(structured, items);
+  assert.equal(coverage.normalized, 4);
+  assert.deepEqual(coverage.ambiguous, ["fix—guard"]);
+  assert.deepEqual(coverage.unknown, ["ghost: not listed"]);
+  assert.deepEqual(coverage.duplicate, []);
+  assert.deepEqual(coverage.missing, []);
+  assert.deepEqual(finding.checklist_items, ["zero-guard", "ghost: not listed"]);
+  assert.deepEqual(coverage.verdicts.map((entry) => [entry.item, entry.verdict, entry.finding_ids]), [
+    ["zero-guard", "finding", ["F-123abc"]],
+    ["empty-average", "keep", []],
+    ["fix", "keep", []],
+    ["fix—guard", "keep", []]
+  ]);
+  assert.equal(
+    coverageWarning(coverage),
+    "Checklist coverage is inconsistent: verdicts or finding links for unknown items (ghost: not listed); labels that match more than one id, read as the longest (fix—guard)."
+  );
+  const rendered = renderStructured({ ...structured, coverage });
+  assert.match(rendered, /Redundant\.\n\nChecklist items: zero-guard, ghost: not listed\n/);
+  assert.match(rendered, /## Checklist coverage\n\n4 of 4 items have a verdict \(3 keep, 1 finding\); 4 labels normalized to bare ids\.\n/);
+
+  // Normalization alone is no warning; ambiguity alone is.
+  const single = checkCoverage({ findings: [], verdicts: [{ item: "zero-guard: The b === 0 check in divide", verdict: "keep", note: "" }] }, items.slice(0, 1));
+  assert.equal(coverageWarning(single), null);
+  assert.match(renderStructured({ ...structured, findings: [], coverage: single }), /1 of 1 items have a verdict \(1 keep\); 1 label normalized to a bare id\./);
+  const twice = checkCoverage({ findings: [], verdicts: [{ item: "zero-guard", verdict: "keep", note: "" }, { item: "`zero-guard`", verdict: "refute", note: "" }] }, items.slice(0, 1));
+  assert.deepEqual(twice.duplicate, ["zero-guard"]);
+  assert.equal(twice.verdicts[0].verdict, "keep");
+  assert.equal(
+    coverageWarning(checkCoverage({ findings: [], verdicts: [{ item: "fix", verdict: "keep", note: "" }, { item: "fix—guard: x", verdict: "keep", note: "" }] }, items.slice(2))),
+    "Checklist coverage is ambiguous: labels that match more than one id, read as the longest (fix—guard)."
+  );
+});
+
+test("renderStructured adds checklist links and a coverage section only when coverage is present", () => {
+  const finding = {
+    id: "F-123abc", observation: "new", severity: "low", title: "Drop the dead branch", body: "Unreachable.", file: "a.rb",
+    line_start: 4, line_end: 4, pre_existing: false, trigger: "", evidence: "", confidence: 0.9, recommendation: "Delete it."
+  };
+  const plain = { verdict: "needs-attention", summary: "s", findings: [finding], next_steps: [], residual_risk: "r" };
+  const before = renderStructured(plain);
+  assert.doesNotMatch(before, /Checklist/);
+  assert.equal(renderStructured({ ...plain, findings: [{ ...finding, checklist_items: [] }] }), before);
+  const items = [{ id: "a", description: "x" }, { id: "b", description: "y" }, { id: "c", description: "z" }];
+  const linked = { ...plain, findings: [{ ...finding, checklist_items: ["a"] }], verdicts: [{ item: "a", verdict: "finding", note: "dead\nbranch" }, { item: "b", verdict: "keep", note: "" }] };
+  const rendered = renderStructured({ ...linked, coverage: checkCoverage(linked, items) });
+  assert.ok(rendered.startsWith(before.slice(0, before.indexOf("Confidence"))));
+  assert.match(rendered, /Unreachable\.\n\nChecklist items: a\n/);
+  assert.ok(rendered.endsWith(
+    "## Residual risk\n\nr\n\n## Checklist coverage\n\n2 of 3 items have a verdict (1 keep, 1 finding); 1 missing.\n\n- a: finding [F-123abc] — dead branch\n- b: keep\n\nNo verdict: c\n"
+  ));
 });
 
 for (const B of BACKENDS) {

@@ -25,6 +25,7 @@ import {
 const TEST_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const KILL_BEFORE_APPLY = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/kill-before-apply.mjs")).href;
 const FAIL_SESSION_AFTER_ARTIFACT = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/fail-session-after-artifact.mjs")).href;
+const INTERRUPT_AFTER_VERDICTS = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/interrupt-after-verdicts.mjs")).href;
 
 const BACKENDS = [
   {
@@ -49,6 +50,9 @@ const BACKENDS = [
     noFindingsEnv: "FAKE_CODEX_NO_FINDINGS",
     observationEnv: "FAKE_CODEX_OBSERVATION",
     titleEnv: "FAKE_CODEX_TITLE",
+    verdictsEnv: "FAKE_CODEX_VERDICTS",
+    checklistItemsEnv: "FAKE_CODEX_CHECKLIST_ITEMS",
+    conversationIdEnv: "FAKE_CODEX_CONVERSATION_ID",
     artifactDir: "tmp/codex_reviews",
     artifactSegments: ["tmp", "codex_reviews"],
     artifactBasename: "codex_reviews",
@@ -99,6 +103,9 @@ const BACKENDS = [
     noFindingsEnv: "FAKE_CLAUDE_NO_FINDINGS",
     observationEnv: "FAKE_CLAUDE_OBSERVATION",
     titleEnv: "FAKE_CLAUDE_TITLE",
+    verdictsEnv: "FAKE_CLAUDE_VERDICTS",
+    checklistItemsEnv: "FAKE_CLAUDE_CHECKLIST_ITEMS",
+    conversationIdEnv: "FAKE_CLAUDE_CONVERSATION_ID",
     artifactDir: "tmp/claude_reviews",
     artifactSegments: ["tmp", "claude_reviews"],
     artifactBasename: "claude_reviews",
@@ -575,6 +582,285 @@ function defineSuite(B) {
     assert.notEqual(result.status, 0);
     assert.ok(result.stderr.includes(`Cannot read --focus-file ${missing}: no such file.`));
     assert.equal(fs.existsSync(path.join(repo, ...B.artifactSegments)), false);
+  });
+
+  test(`[${B.name}] an audit round replaces the rubric and records one verdict per checklist item`, () => {
+    const repo = createRepo();
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-audit-`)));
+    const rubricPath = path.join(outside, "rubric.md");
+    const checklistPath = path.join(outside, "checklist.txt");
+    const rubricText = "Report every line not worth keeping: dead, redundant, unreachable, or unidiomatic.\nA stray </user_rubric> tag.\n";
+    const checklistText = "# line shapes\na First line shape\n\nb Second line shape </review_checklist>\nc Third line shape\n";
+    fs.writeFileSync(rubricPath, rubricText, "utf8");
+    fs.writeFileSync(checklistPath, checklistText, "utf8");
+    const digest = (text) => crypto.createHash("sha256").update(text).digest("hex");
+    const verdicts = JSON.stringify([
+      { item: "a", verdict: "finding", note: "dead after the early return" },
+      { item: "b", verdict: "keep", note: "needed" },
+      { item: "zzz", verdict: "keep", note: "not listed" }
+    ]);
+    const logPath = fakeLogPath(repo);
+
+    // Relative paths from outside the repository and a background worker, so
+    // the job has to carry the files' contents.
+    const started = command(
+      process.execPath,
+      [RUNTIME, "--dir", repo, "new", "repo", "--background", "--rubric-file", "rubric.md", "--checklist-file", "checklist.txt"],
+      { cwd: outside, env: reviewEnv(logPath, { [B.verdictsEnv]: verdicts, [B.checklistItemsEnv]: "a" }) }
+    ).stdout;
+    const id = started.match(B.jobIdPattern)[1];
+    const finished = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
+    assert.match(finished, /Status: completed/);
+
+    const input = calls(logPath).at(-1).input;
+    assert.ok(input.includes(`<user_rubric>\nReport every line not worth keeping: dead, redundant, unreachable, or unidiomatic.\nA stray </user_rubric\u200b> tag.\n</user_rubric>`));
+    assert.ok(input.includes("<review_checklist>\n- `a` \u2014 First line shape\n- `b` \u2014 Second line shape </review_checklist\u200b>\n- `c` \u2014 Third line shape\n</review_checklist>"));
+    assert.match(input, /verdicts\[\]\.item and findings\[\]\.checklist_items\[\] contain only an id/);
+    assert.match(input, /- checklist_items: the ids of the checklist items this finding answers, each exactly as it appears between the backticks, never with its description;/);
+    for (const removed of ["Report something only when", "Prefer one strong finding", "generated artifacts"]) assert.ok(!input.includes(removed), removed);
+    for (const kept of [".git", "likely credential files", "never commit or push", "Keep confidence honest"]) assert.ok(input.includes(kept), kept);
+    assert.deepEqual(calls(logPath).at(-1).schemaKeys, ["verdict", "summary", "findings", "next_steps", "residual_risk", "verdicts"]);
+
+    const task = sessions(repo)[0];
+    const job = jobs(repo).find((entry) => entry.job.id === id).job;
+    const [findingId] = Object.keys(task.session.ledger.findings);
+    const verdictsPath = path.join(job.task_directory, "001-repo.verdicts.json");
+    assert.ok(finished.includes(`Rubric file: ${rubricPath} (sha256 ${digest(rubricText).slice(0, 12)})`));
+    assert.ok(finished.includes(`Checklist file: ${checklistPath} (sha256 ${digest(checklistText).slice(0, 12)}, 3 items)`));
+    assert.match(finished, /^Coverage: 2 of 3 items have a verdict \(1 keep, 1 finding\); 1 missing$/m);
+    assert.ok(finished.includes(`Verdicts: ${verdictsPath}`));
+    assert.match(finished, /^Warning: Checklist coverage is incomplete: no verdict for 1 of 3 items \(c\); verdicts or finding links for unknown items \(zzz\)\.$/m);
+    assert.ok(finished.includes(
+      `## Checklist coverage\n\n2 of 3 items have a verdict (1 keep, 1 finding); 1 missing.\n\n- a: finding [${findingId}] — dead after the early return\n- b: keep — needed\n\nNo verdict: c\n`
+    ));
+    assert.match(finished, /The fake reviewer found a deterministic defect\.\n\nChecklist items: a\n/);
+
+    const recorded = JSON.parse(fs.readFileSync(verdictsPath, "utf8"));
+    assert.equal(recorded.job_id, id);
+    assert.equal(recorded.session_id, task.session.session_id);
+    assert.deepEqual(recorded.rubric_file, { path: rubricPath, sha256: digest(rubricText) });
+    assert.deepEqual(recorded.checklist_file.items.map((item) => item.id), ["a", "b", "c"]);
+    assert.deepEqual(recorded.verdicts[0], { item: "a", description: "First line shape", verdict: "finding", finding_ids: [findingId], note: "dead after the early return" });
+    assert.deepEqual(recorded.coverage.missing, ["c"]);
+    assert.deepEqual(recorded.coverage.unknown, ["zzz"]);
+    assert.deepEqual(recorded.unknown_verdicts, [{ item: "zzz", verdict: "keep", note: "not listed" }]);
+    assert.equal(job.coverage.verdicts, undefined);
+    assert.deepEqual(job.findings[0].checklist_items, ["a"]);
+    assert.ok(fs.existsSync(path.join(job.task_directory, "review-schema.json")));
+    assert.equal(fs.existsSync(path.join(repo, ...B.artifactSegments, "review-schema.json")), false);
+
+    const artifact = fs.readFileSync(job.artifact, "utf8");
+    assert.match(artifact, /## Warning\n\nChecklist coverage is incomplete/);
+    assert.match(artifact, /## Checklist coverage/);
+    assert.ok(artifact.includes(`Rubric file: ${rubricPath} (sha256 ${digest(rubricText)})`));
+    const note = task.session.ledger.notes.at(-1);
+    assert.deepEqual(note.rubric_file, { path: rubricPath, sha256: digest(rubricText) });
+    assert.deepEqual(note.checklist_file, { path: checklistPath, sha256: digest(checklistText) });
+    assert.doesNotMatch(JSON.stringify(task.session.ledger), /not worth keeping|First line shape/);
+
+    const cited = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    assert.ok(cited.includes(`Coverage: 2 of 3 items have a verdict (1 keep, 1 finding); 1 missing\nVerdicts: ${verdictsPath}\n`));
+    assert.ok(cited.indexOf("Coverage:") < cited.indexOf(`${findingId} [high]`));
+    assert.match(cited, new RegExp(`${findingId} \\[high\\] Example defect — example\\.txt:1\\n  checklist items: a\\n`));
+
+    // The options apply per round; without them the round is an ordinary review.
+    const plain = runReview(repo, ["again"]);
+    const plainInput = calls(logPath).at(-1).input;
+    assert.deepEqual(calls(logPath).at(-1).schemaKeys, ["verdict", "summary", "findings", "next_steps", "residual_risk"]);
+    assert.match(plainInput, /generated artifacts/);
+    assert.match(plainInput, /Prefer one strong finding over several weak ones\. Keep confidence honest/);
+    assert.match(plainInput, /Tests 1 and 4 govern findings raised for the first time/);
+    assert.doesNotMatch(plainInput, /<user_rubric>|<review_checklist>|## Checklist/);
+    assert.ok(plainInput.includes(
+      `- (rubric file ${rubricPath}, sha256 ${digest(rubricText).slice(0, 12)}) (checklist file ${checklistPath}, sha256 ${digest(checklistText).slice(0, 12)})`
+    ));
+    assert.doesNotMatch(plain.result.stdout, /Coverage:|Verdicts:|Checklist/);
+    assert.doesNotMatch(plain.result.stderr, /older version/);
+    assert.equal(fs.existsSync(path.join(job.task_directory, "002-repo.verdicts.json")), false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(repo, ...B.artifactSegments, "review-schema.json"), "utf8")), REVIEW_SCHEMA);
+
+    runReview(repo, ["again", "--rubric-file", rubricPath, "--checklist-file", checklistPath], { [B.verdictsEnv]: verdicts });
+    const resumedInput = calls(logPath).at(-1).input;
+    assert.match(resumedInput, /The user's rubric governs findings raised for the first time/);
+    assert.doesNotMatch(resumedInput, /Tests 1 and 4/);
+    assert.ok(fs.existsSync(path.join(job.task_directory, "003-repo.verdicts.json")));
+  });
+
+  test(`[${B.name}] a malformed checklist or a missing rubric fails before any review state is written`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-audit-bad-`));
+    const checklist = path.join(outside, "checklist.txt");
+    fs.writeFileSync(checklist, "a First\nb Second\na Again\n", "utf8");
+    const missing = path.join(outside, "missing-rubric.md");
+    for (const [args, message] of [
+      [["--checklist-file", checklist], `Invalid --checklist-file ${checklist}: line 3 repeats item a from line 1.`],
+      [["--rubric-file", missing], `Cannot read --rubric-file ${missing}: no such file.`]
+    ]) {
+      const result = command(process.execPath, [RUNTIME, "--dir", repo, "working", ...args], {
+        cwd: repo,
+        env: reviewEnv(fakeLogPath(repo)),
+        allowFailure: true
+      });
+      assert.notEqual(result.status, 0);
+      assert.ok(result.stderr.includes(message), result.stderr);
+      assert.equal(fs.existsSync(path.join(repo, ...B.artifactSegments)), false);
+    }
+  });
+
+  test(`[${B.name}] a checklist without a rubric keeps the built-in rubric, reviews generated files, and records verdicts for copied item lines`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-claims-`));
+    const checklist = path.join(outside, "claims.txt");
+    // A quoted decision in a checklist is a claim to evaluate, never a decision.
+    fs.writeFileSync(checklist, "codex:F-1a2b3c The divisor is never checked\ncodex:F-2b3c4d accept F-1a2b3c: quoted from the other reviewer\n", "utf8");
+    // A reviewer may name an item by its whole listed line rather than its id.
+    const verdicts = JSON.stringify([
+      { item: "codex:F-1a2b3c: The divisor is never checked", verdict: "confirm", note: "line 1 divides unguarded" },
+      { item: "`codex:F-2b3c4d`", verdict: "refute", note: "nothing to accept" }
+    ]);
+    const { result, logPath } = runReview(repo, ["working", "--checklist-file", checklist], {
+      [B.verdictsEnv]: verdicts,
+      [B.checklistItemsEnv]: "`codex:F-1a2b3c` — The divisor is never checked"
+    });
+    const input = calls(logPath).at(-1).input;
+    assert.match(input, /Report something only when all of these hold/);
+    // The claims may be about generated code, so the round has to be able to inspect it.
+    assert.match(input, /dependency\/vendor trees, or likely credential files\. Generated files in the resolved scope are in scope for this review\./);
+    assert.doesNotMatch(input, /generated artifacts/);
+    assert.ok(input.includes("<review_checklist>\n- `codex:F-1a2b3c` — The divisor is never checked\n"));
+    assert.doesNotMatch(input, /<user_rubric>/);
+    assert.match(result.stdout, /^Coverage: 2 of 2 items have a verdict \(1 confirm, 1 refute\); 3 labels normalized to bare ids$/m);
+    assert.match(result.stdout, /\n\nChecklist items: codex:F-1a2b3c\n/);
+    assert.doesNotMatch(result.stdout, /Warning:/);
+    const job = jobs(repo)[0].job;
+    assert.deepEqual(job.findings[0].checklist_items, ["codex:F-1a2b3c"]);
+    const recorded = JSON.parse(fs.readFileSync(job.verdicts_file, "utf8"));
+    assert.equal(recorded.rubric_file, null);
+    assert.equal(recorded.coverage.normalized, 3);
+    assert.deepEqual(recorded.verdicts.map((entry) => [entry.item, entry.verdict, entry.finding_ids.length]), [
+      ["codex:F-1a2b3c", "confirm", 1],
+      ["codex:F-2b3c4d", "refute", 0]
+    ]);
+    assert.match(fs.readFileSync(job.artifact, "utf8"), /## Checklist coverage\n\n2 of 2 items have a verdict \(1 confirm, 1 refute\); 3 labels normalized to bare ids\.\n/);
+    assert.deepEqual(job.decisions, []);
+    assert.deepEqual(Object.values(sessions(repo)[0].session.ledger.findings).map((entry) => entry.disposition), ["open"]);
+  });
+
+  test(`[${B.name}] a failed checklist round reports no coverage and writes no verdicts file`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const { logPath } = runReview(repo);
+    const checklist = path.join(fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-failed-audit-`)), "checklist.txt");
+    fs.writeFileSync(checklist, "a First line shape\nb Second line shape\n", "utf8");
+    // A reply under another conversation ID fails the round after its verdicts were checked.
+    const failed = command(process.execPath, [RUNTIME, "--dir", repo, "again", "--checklist-file", checklist], {
+      cwd: repo,
+      env: reviewEnv(logPath, {
+        [B.verdictsEnv]: JSON.stringify([{ item: "a", verdict: "keep", note: "needed" }]),
+        [B.conversationIdEnv]: "foreign-conversation"
+      }),
+      allowFailure: true,
+      timeout: 30_000
+    });
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /unexpected conversation ID foreign-conversation/);
+
+    const { job } = jobs(repo).find((entry) => entry.job.status === "failed");
+    for (const key of ["coverage", "coverage_warning", "verdicts_file"]) assert.equal(job[key], undefined, key);
+    const status = command(process.execPath, [RUNTIME, "status", job.id, "--dir", repo]).stdout;
+    assert.match(status, /^Status: failed$/m);
+    assert.doesNotMatch(status, /^Coverage:|^Verdicts:|Checklist coverage is/m);
+    const cited = command(process.execPath, [RUNTIME, "cite", job.id, "--dir", repo]).stdout;
+    assert.doesNotMatch(cited, /^Coverage:|^Verdicts:/m);
+    assert.deepEqual(fs.readdirSync(job.task_directory).filter((name) => name.endsWith(".verdicts.json")), []);
+    const artifact = fs.readFileSync(job.artifact, "utf8");
+    assert.match(artifact, /## Review output \(not applied\)[\s\S]*## Checklist coverage/);
+    assert.doesNotMatch(artifact, /Checklist coverage is/);
+  });
+
+  // Runs a first checklist round in a fresh session, interrupted right after
+  // its verdicts file is written.
+  function interruptedAuditRound(mode) {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const checklist = path.join(fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-interrupted-audit-`)), "checklist.txt");
+    fs.writeFileSync(checklist, "a First line shape\n", "utf8");
+    const logPath = fakeLogPath(repo);
+    const result = command(
+      process.execPath,
+      ["--import", INTERRUPT_AFTER_VERDICTS, RUNTIME, "--dir", repo, "working", "--checklist-file", checklist],
+      {
+        cwd: repo,
+        env: reviewEnv(logPath, {
+          [B.verdictsEnv]: JSON.stringify([{ item: "a", verdict: "keep", note: "needed" }]),
+          INTERRUPT_AFTER_VERDICTS: mode
+        }),
+        allowFailure: true,
+        timeout: 30_000
+      }
+    );
+    return { repo, logPath, result };
+  }
+
+  function verdictsFiles(directory) {
+    return fs.readdirSync(directory).filter((name) => name.endsWith(".verdicts.json"));
+  }
+
+  test(`[${B.name}] a checklist round that fails after writing its verdicts file removes it`, () => {
+    const { repo, result } = interruptedAuditRound("throw");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Simulated failure after writing \S+\/001-working\.verdicts\.json .*session was retired/);
+    const { job } = jobs(repo)[0];
+    assert.equal(job.status, "failed");
+    for (const key of ["coverage", "coverage_warning", "verdicts_file"]) assert.equal(job[key], undefined, key);
+    assert.deepEqual(verdictsFiles(job.task_directory), []);
+    assert.doesNotMatch(command(process.execPath, [RUNTIME, "status", job.id, "--dir", repo]).stdout, /^Coverage:|^Verdicts:/m);
+  });
+
+  test(`[${B.name}] recovering a worker that died after writing its verdicts file removes it`, () => {
+    const { repo, logPath, result } = interruptedAuditRound("kill");
+    assert.equal(result.signal, "SIGKILL");
+    const { path: jobFile, job: interrupted } = jobs(repo)[0];
+    assert.equal(interrupted.status, "running");
+    assert.deepEqual(verdictsFiles(interrupted.task_directory), ["001-working.verdicts.json"]);
+    assert.equal(fs.existsSync(interrupted.artifact), false);
+
+    const again = command(process.execPath, [RUNTIME, "--dir", repo, "again"], {
+      cwd: repo,
+      env: reviewEnv(logPath),
+      allowFailure: true
+    });
+    assert.notEqual(again.status, 0);
+    assert.match(again.stderr, new RegExp(`previous ${B.label} review session.*retired`, "i"));
+    const recovered = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+    assert.equal(recovered.status, "failed");
+    assert.match(recovered.error, /worker exited/);
+    assert.equal(recovered.unapplied_artifact, interrupted.artifact);
+    for (const key of ["coverage", "coverage_warning", "verdicts_file"]) assert.equal(recovered[key], undefined, key);
+    assert.deepEqual(verdictsFiles(interrupted.task_directory), []);
+  });
+
+  test(`[${B.name}] cancelling a worker that died after writing its verdicts file removes it`, () => {
+    const { repo, result } = interruptedAuditRound("kill");
+    assert.equal(result.signal, "SIGKILL");
+    const { path: jobFile, job: interrupted } = jobs(repo)[0];
+    assert.equal(interrupted.status, "running");
+    assert.ok(interrupted.coverage);
+    assert.equal(interrupted.verdicts_file, path.join(interrupted.task_directory, "001-working.verdicts.json"));
+    assert.deepEqual(verdictsFiles(interrupted.task_directory), ["001-working.verdicts.json"]);
+
+    const cancelled = command(process.execPath, [RUNTIME, "cancel", interrupted.id, "--dir", repo]).stdout;
+    assert.match(cancelled, new RegExp(`Job ${interrupted.id} had already stopped and is now failed\\. The review worker exited`));
+    const recovered = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+    assert.equal(recovered.status, "failed");
+    assert.equal(recovered.unapplied_artifact, interrupted.artifact);
+    for (const key of ["coverage", "coverage_warning", "verdicts_file"]) assert.equal(recovered[key], undefined, key);
+    assert.deepEqual(verdictsFiles(interrupted.task_directory), []);
+    const status = command(process.execPath, [RUNTIME, "status", interrupted.id, "--dir", repo]).stdout;
+    assert.match(status, /^Status: failed$/m);
+    assert.doesNotMatch(status, /^Coverage:|^Verdicts:/m);
   });
 
   test(`[${B.name}] cite prints the lines a finding refers to from the reviewed revision`, () => {
@@ -1412,7 +1698,10 @@ function defineSuite(B) {
       completed_at: "2000-01-01T00:00:00.000Z",
       artifact: path.join(acceptedJob.task_directory, "002-working.md"),
       result_summary: "Unapplied summary",
-      rendered_result: "Unapplied result"
+      rendered_result: "Unapplied result",
+      coverage: { items: 1, answered: 0, counts: {}, missing: ["a"] },
+      coverage_warning: "Checklist coverage is incomplete: no verdict for 1 of 1 items (a).",
+      verdicts_file: path.join(acceptedJob.task_directory, "002-working.verdicts.json")
     })}\n`, "utf8");
 
     const again = command(process.execPath, [RUNTIME, "--dir", repo, "again"], {
@@ -1432,6 +1721,7 @@ function defineSuite(B) {
     assert.equal(stale.result_summary, null);
     assert.equal(stale.rendered_result, null);
     assert.match(stale.unapplied_artifact, /002-working\.md$/);
+    for (const key of ["coverage", "coverage_warning", "verdicts_file"]) assert.equal(stale[key], undefined, key);
     assert.notEqual(stale.completed_at, "2000-01-01T00:00:00.000Z");
 
     const replacement = runReview(repo);

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 // Opt-in live check against the real claude and codex CLIs: one review, one
-// resumed re-review, and cite, on a disposable repository, at low effort.
-// Run with `npm run smoke`; it spends reviewer usage on both accounts.
+// resumed re-review, cite, and an audit round with a rubric and a checklist,
+// on a disposable repository, at low effort. Run with `npm run smoke`, or
+// `npm run smoke -- codex` for one half; it spends reviewer usage.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -49,5 +50,20 @@ for (const [name, entry] of Object.entries(ENTRIES)) {
   process.stdout.write(`${again.split("\n").filter((line) => /^(Status|Session|Warning|## Verdict|### )/.test(line)).join("\n")}\n`);
   process.stdout.write(`=== ${name}: cite\n`);
   process.stdout.write(`${run(process.execPath, [entry, "--dir", repo, "cite"], repo).split("\n").slice(0, 20).join("\n")}\n`);
+  // Only the real CLIs show whether Codex's strict --output-schema and Claude's
+  // --json-schema accept the schema that a checklist extends.
+  process.stdout.write(`=== ${name}: audit with a rubric and a checklist\n`);
+  const inputs = fs.mkdtempSync(path.join(os.tmpdir(), "cross-review-smoke-audit-"));
+  const rubric = path.join(inputs, "rubric.md");
+  const checklist = path.join(inputs, "checklist.txt");
+  fs.writeFileSync(rubric, "Report a line only when it is not worth keeping: dead, redundant, unreachable, or unidiomatic. Rate one that changes behavior high and any other low.\n", "utf8");
+  fs.writeFileSync(checklist, "zero-guard The b === 0 check in divide\nempty-average average when values is empty\n", "utf8");
+  const audit = run(process.execPath, [entry, "--dir", repo, "new", "working", "--wait", "--effort", "low", "--rubric-file", rubric, "--checklist-file", checklist], repo);
+  // A structured result with at least one verdict shows that the reviewer
+  // accepted and filled the extended schema.
+  if (!/^## Verdict/m.test(audit) || !/^Coverage: [12] of 2 items have a verdict/m.test(audit)) {
+    throw new Error(`${name}: the audit returned no structured result with a verdict:\n${audit}`);
+  }
+  process.stdout.write(`${audit.split("\n").filter((line) => /^(Status|Coverage|Verdicts|Warning|## Verdict|### |- (zero-guard|empty-average):)/.test(line)).join("\n")}\n`);
   process.stdout.write(`=== ${name}: ok (${repo})\n`);
 }

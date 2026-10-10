@@ -1,7 +1,7 @@
 ---
 name: codex-review
 description: Run Codex reviews from Claude Code with explicit working-tree, branch, commit, range, or whole-repository scopes; arbitrary repository paths; custom focus or follow-up feedback; persistent review threads that remember earlier findings and user decisions; and background job controls. Use when the user asks Codex to review code, wants a second opinion from Codex on changes, wants a re-review that does not repeat rejected findings, compares a branch to a base, reviews a commit or repository, or manages a running Codex review.
-argument-hint: "[working|branch <base>|commit <ref>|range <a>..<b>|repo|again|new|reset|status|result|cancel] [--background] [--focus-file <path>] [-- focus]"
+argument-hint: "[working|branch <base>|commit <ref>|range <a>..<b>|repo|again|new|reset|status|result|cancel] [--background] [--focus-file <path>] [--rubric-file <path>] [--checklist-file <path>] [-- focus]"
 allowed-tools: Bash(node *)
 ---
 
@@ -23,6 +23,7 @@ Examples:
 node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" --background
 node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" branch main --background -- "Focus on tenant isolation"
 node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" range main..HEAD --background --focus-file docs/review-focus.md -- "Also check the importer"
+node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" new repo --background --rubric-file audit/rubric.md --checklist-file audit/checklist.txt
 node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" again --background -- "I intentionally rejected the callback recommendation because it is public API"
 node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" --resume-session SESSION_ID range PRIOR_HEAD..HEAD --background -- "Verify the bounded fixes"
 node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" --dir /path/to/repo working --background
@@ -83,6 +84,16 @@ node "${CLAUDE_SKILL_DIR}/scripts/codex-review.mjs" status --dir /path/to/repo
   `reopen F-...`, since the runtime never reads decisions from a focus file. The runtime records the disposition
   before Codex runs and shows all prior findings and decisions to Codex in every later round, including after a
   retired session.
+- For an audit, such as a line-by-line review of generated code, pass `--rubric-file <path>` to replace the built-in
+  finding and severity rules and `--checklist-file <path>` to require one verdict per listed item. Pass them again on
+  every round that should use them; neither carries over. Start an audit with `new` to keep it separate from earlier
+  reviews, and start the next ordinary review with `new` too, since a plain round resumes the audit's conversation and
+  inherits its findings. A rubric must rate severity as `critical`, `high`, `medium`, and `low`. When a checklist
+  lists another reviewer's findings to confirm or refute, prefix their ids, for example `claude:F-1a2b3c`, so they are
+  not confused with this session's own ids. Relay the `Coverage:` line, every verdict other than `keep`, and the
+  coverage `Warning:` line verbatim, not every `keep`.
+  A prose review checklist is still focus text for `--focus-file`; use `--checklist-file` only for a list of
+  `<id> <description>` lines that should each get a verdict.
 - Run reviews with `--background`. Claude Code's Bash tool has a hard per-call time limit, and a max-effort Codex
   review often runs longer than that; the background worker is detached from the shell and survives the end of the
   call and of the session. Use `--wait` on a review only when the user explicitly asks to block and the change is tiny.

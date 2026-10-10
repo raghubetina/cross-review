@@ -61,11 +61,54 @@ before anything is recorded. The reviewer sees the file's text first, labeled wi
 The session ledger records the file's path and SHA-256, not its text, and decisions are parsed only from the `--`
 text, so a focus file cannot record one. Pass `--focus-file` again on each round that should include it.
 
+## Audits
+
+For a line-by-line audit, such as of generated code, pass a rubric file, a checklist file, or both:
+
+```text
+claude-review.mjs new repo --rubric-file audit/rubric.md --checklist-file audit/checklist.txt
+```
+
+`--rubric-file` replaces the built-in rules for what counts as a finding and how severe it is, and with them the
+built-in exclusions, such as linter nits and the rule that a change scope reports only what the change introduced;
+the rubric restates any it still wants and rates severity as `critical`, `high`, `medium`, and `low`.
+
+`--checklist-file` lists one item per line as `<id> <description>`; blank lines and lines starting with `#` are
+skipped. The reviewer returns exactly one verdict per item, with a one-line note: `keep`, `finding`, `confirm`,
+`refute`, or `not_applicable`. Each finding names the checklist items it answers, and the runtime derives each
+verdict's finding ids from those links. A checklist without a rubric keeps the built-in rubric, for example to
+confirm or refute another reviewer's findings listed by id.
+
+A round with either file also reviews generated files in the resolved scope, which an ordinary review skips. The
+artifact directory, `.git`, dependency and vendor trees, and credential files stay off limits, and the reviewer still
+writes only to scratch and never commits or pushes.
+
+The runtime reads both files on the host when it prepares the review. A relative path resolves against the current
+directory, not `--dir`. A missing or unreadable file, or a checklist with a duplicate id, a line without a
+description, or no items, fails before anything is recorded. The session ledger records each file's path and SHA-256,
+not its text. Neither file carries over: pass it again on each round that should use it. Start an audit with `new` to
+keep it separate from earlier reviews, and start the next ordinary review with `new` too, since a plain round resumes
+the audit's conversation and inherits its findings.
+
+The runtime checks the verdicts against the checklist and never fills one in. A verdict or link that copies an item's
+listed line instead of its bare id, such as `` `id` `` or `id: description`, counts for that id, and the `Coverage:`
+line says how many labels were normalized; a label that fits two ids, such as `a—b: x` when both `a` and `a—b` are
+listed, counts for the longer and is reported in the warning. Items without a verdict, verdicts or links naming
+unlisted items, an item answered twice, a `finding` verdict no finding links to, and a finding linked to an item
+marked `keep` or `not_applicable` become one `Warning:` line and a warning in the artifact. `status` and `result`
+print a `Coverage:` line with the count of each verdict and a `Verdicts:` line naming
+`<task directory>/<seq>-<scope>.verdicts.json`, which each completed round writes with the checklist, the coverage,
+and the verdicts in checklist order; a failed or cancelled round leaves none and prints no `Coverage:` line. The
+rendered result ends with a checklist coverage section, and `cite` prints the coverage before the findings. Verdicts
+never change a finding's disposition.
+
 ## Options
 
 ```text
 --dir <path>                 target another repository
 --focus-file <path>          add a file's text to the review focus; see above
+--rubric-file <path>         replace the finding and severity rules for this round; see Audits
+--checklist-file <path>      require one verdict per item listed in this file; see Audits
 --resume-session <id>        resume this repository's prior active session
 --model <model>              explicitly select and persist a model for this session
 --effort <level>             low, medium, high, xhigh, or max; default max
@@ -109,7 +152,8 @@ mode).
 Findings are sorted by severity then confidence. Each shows its id (`F-` plus six hex characters, assigned by the
 runtime and shown back to the reviewer in every later round), severity, title, location, flags such as `pre-existing`, `persisting`, `duplicate id`, or `no location
 cited`, then the body, the trigger, quoted evidence, confidence, and recommendation. Results end with numbered next
-steps and residual risk. The ids are recorded in the session ledger inside `session.json`.
+steps and residual risk. The ids are recorded in the session ledger inside `session.json`. With a checklist,
+results end with a checklist coverage section; see Audits.
 
 ## Decisions
 
@@ -157,6 +201,9 @@ them.
 - “Continue session X over only these fixes” → `--resume-session X range PRIOR_HEAD..HEAD`
 - “Reject finding F-1a2b3c, it is intentional” → `again -- reject F-1a2b3c: intentional`
 - “Use the checklist in docs/review-focus.md” → add `--focus-file docs/review-focus.md`
+- “Audit the generated app with rubric R and checklist C” → `new repo --rubric-file R --checklist-file C`
+- “Have Claude confirm or refute Codex's findings” → add `--checklist-file C`, where C lists each finding as
+  `codex:F-1a2b3c <claim>`
 - “Start over with Claude” → `new`
 - “Forget that review thread” → `reset`
 - “Run it while we keep working” → `--background`

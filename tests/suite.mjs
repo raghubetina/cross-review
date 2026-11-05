@@ -7,9 +7,10 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import claudeBackend from "../src/backends/claude.mjs";
-import codexBackend from "../src/backends/codex.mjs";
+import claudeBackend from "../plugins/cross-review/skills/cross-review/scripts/backends/claude.mjs";
+import codexBackend from "../plugins/cross-review/skills/cross-review/scripts/backends/codex.mjs";
 import {
+  HOST_ENVIRONMENT,
   REVIEW_SCHEMA,
   consolidateLedger,
   normalizeStructured,
@@ -20,9 +21,13 @@ import {
   resolveRepository,
   resolveScope,
   validateBackend
-} from "../src/runtime.mjs";
+} from "../plugins/cross-review/skills/cross-review/scripts/runtime.mjs";
+
+// The suite may itself run inside one of the agents it tests as a host.
+for (const name of [...HOST_ENVIRONMENT, "CROSS_REVIEW_DEPTH"]) delete process.env[name];
 
 const TEST_ROOT = path.dirname(fileURLToPath(import.meta.url));
+const ENTRY_SCRIPT = path.resolve(TEST_ROOT, "../plugins/cross-review/skills/cross-review/scripts/cross-review.mjs");
 const KILL_BEFORE_APPLY = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/kill-before-apply.mjs")).href;
 const FAIL_SESSION_AFTER_ARTIFACT = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/fail-session-after-artifact.mjs")).href;
 const INTERRUPT_AFTER_VERDICTS = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/interrupt-after-verdicts.mjs")).href;
@@ -32,7 +37,7 @@ const BACKENDS = [
     name: "codex",
     label: "Codex",
     module: codexBackend,
-    runtime: path.resolve(TEST_ROOT, "../plugins/codex-review/skills/codex-review/scripts/codex-review.mjs"),
+    hostEnv: { CODEX_THREAD_ID: "host-thread" },
     fake: path.resolve(TEST_ROOT, "fixtures/fake-codex.mjs"),
     binEnv: "CODEX_REVIEW_CODEX_BIN",
     logEnv: "FAKE_CODEX_LOG",
@@ -64,6 +69,7 @@ const BACKENDS = [
       assert.equal(args[0], "exec");
       assert.ok(args.includes(`sandbox_mode="${sandbox}"`));
       assert.ok(args.includes('approval_policy="never"'));
+      assert.ok(args.includes('shell_environment_policy.set.CROSS_REVIEW_DEPTH="1"'));
       assert.ok(args.includes('model_reasoning_effort="max"'));
       assert.ok(args.includes("--json"));
       assert.ok(args.includes("--output-schema"));
@@ -72,20 +78,13 @@ const BACKENDS = [
       assert.ok(!args.includes("-m"));
       assert.equal(args.includes("sandbox_workspace_write.network_access=true"), capability === "workspace");
       assert.ok(!args.some((argument) => argument.startsWith("sandbox_workspace_write.writable_roots=")));
-    },
-    skillDirectory: path.resolve(TEST_ROOT, "../plugins/codex-review/skills/codex-review"),
-    skillPatterns: [
-      /\$\{CLAUDE_SKILL_DIR\}\/scripts\/codex-review\.mjs/,
-      /Run reviews with `--background`/,
-      /call `result --wait` repeatedly/,
-      /no deadline unless `--timeout-minutes` sets one/
-    ]
+    }
   },
   {
     name: "claude",
     label: "Claude",
     module: claudeBackend,
-    runtime: path.resolve(TEST_ROOT, "../plugins/claude-review/skills/claude-review/scripts/claude-review.mjs"),
+    hostEnv: { CLAUDECODE: "1" },
     fake: path.resolve(TEST_ROOT, "fixtures/fake-claude.mjs"),
     binEnv: "CLAUDE_REVIEW_CLAUDE_BIN",
     logEnv: "FAKE_CLAUDE_LOG",
@@ -126,14 +125,7 @@ const BACKENDS = [
       assert.ok(!args.includes("--strict-mcp-config"));
       assert.equal(args[args.indexOf("--effort") + 1], "max");
       assert.ok(!args.includes("--model"));
-    },
-    skillDirectory: path.resolve(TEST_ROOT, "../plugins/claude-review/skills/claude-review"),
-    skillPatterns: [
-      /\$SKILL_DIR\/scripts\/claude-review\.mjs/,
-      /Choose foreground or background execution from the workflow/,
-      /Do not impose an agent-side timeout/,
-      /no deadline unless `--timeout-minutes` sets one/
-    ]
+    }
   }
 ];
 
@@ -159,7 +151,7 @@ function calls(logPath) {
 }
 
 function defineSuite(B) {
-  const RUNTIME = B.runtime;
+  const ENTRY = [ENTRY_SCRIPT, B.name];
   const FAKE = B.fake;
 
   function createRepo() {
@@ -188,7 +180,7 @@ function defineSuite(B) {
 
   function runReview(repo, args = [], extraEnv = {}) {
     const logPath = fakeLogPath(repo);
-    const result = command(process.execPath, [RUNTIME, "--dir", repo, ...args], {
+    const result = command(process.execPath, [...ENTRY, "--dir", repo, ...args], {
       cwd: repo,
       env: reviewEnv(logPath, extraEnv),
       allowFailure: extraEnv[B.failEnv] === "1" || extraEnv[B.commitEnv] === "1",
@@ -262,7 +254,7 @@ function defineSuite(B) {
 
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
-    const rejected = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--timeout-minutes", "0"], {
+    const rejected = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--timeout-minutes", "0"], {
       cwd: repo,
       env: reviewEnv(fakeLogPath(repo)),
       allowFailure: true
@@ -270,7 +262,7 @@ function defineSuite(B) {
     assert.notEqual(rejected.status, 0);
     assert.match(rejected.stderr, /--timeout-minutes must be a positive number/);
     assert.equal(fs.existsSync(path.join(repo, ...B.artifactSegments)), false);
-    assert.match(command(process.execPath, [RUNTIME, "--help"]).stdout, /--timeout-minutes <number> +Hard timeout \(default: none\)/);
+    assert.match(command(process.execPath, [...ENTRY, "--help"]).stdout, /--timeout-minutes <number> +Hard timeout \(default: none\)/);
   });
 
 
@@ -445,7 +437,7 @@ function defineSuite(B) {
     const fixed = git(repo, "rev-parse", "HEAD");
     const failed = command(
       process.execPath,
-      [RUNTIME, "--dir", repo, "--resume-session", sessionId, "range", `${reviewed}..${fixed}`, "--", `reject ${id}: by design`],
+      [...ENTRY, "--dir", repo, "--resume-session", sessionId, "range", `${reviewed}..${fixed}`, "--", `reject ${id}: by design`],
       { cwd: repo, env: reviewEnv(first.logPath, { [B.failEnv]: "1" }), allowFailure: true }
     );
     assert.notEqual(failed.status, 0);
@@ -516,7 +508,7 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const first = runReview(repo);
-    const result = command(process.execPath, [RUNTIME, "--dir", repo, "again", "--", "reject F-abcdef: nope"], {
+    const result = command(process.execPath, [...ENTRY, "--dir", repo, "again", "--", "reject F-abcdef: nope"], {
       cwd: repo,
       env: reviewEnv(first.logPath),
       allowFailure: true
@@ -540,13 +532,13 @@ function defineSuite(B) {
 
     // From a directory outside the repository, so the relative path and the
     // background worker's own working directory differ.
-    const started = command(process.execPath, [RUNTIME, "--dir", repo, "again", "--background", "--focus-file", "focus.md", "--", "Also look at the loop."], {
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "again", "--background", "--focus-file", "focus.md", "--", "Also look at the loop."], {
       cwd: outside,
       env: reviewEnv(first.logPath)
     }).stdout;
     assert.ok(started.includes(`Focus file: ${focusPath} (sha256 ${sha256.slice(0, 12)})`));
     const id2 = started.match(B.jobIdPattern)[1];
-    const finished = command(process.execPath, [RUNTIME, "result", id2, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
+    const finished = command(process.execPath, [...ENTRY, "result", id2, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
     assert.match(finished, /Status: completed/);
     const input = calls(first.logPath).at(-1).input;
     assert.ok(input.includes(
@@ -574,7 +566,7 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const missing = path.join(os.tmpdir(), `${B.name}-no-such-focus-${process.pid}.md`);
-    const result = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--focus-file", missing], {
+    const result = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--focus-file", missing], {
       cwd: repo,
       env: reviewEnv(fakeLogPath(repo)),
       allowFailure: true
@@ -605,11 +597,11 @@ function defineSuite(B) {
     // the job has to carry the files' contents.
     const started = command(
       process.execPath,
-      [RUNTIME, "--dir", repo, "new", "repo", "--background", "--rubric-file", "rubric.md", "--checklist-file", "checklist.txt"],
+      [...ENTRY, "--dir", repo, "new", "repo", "--background", "--rubric-file", "rubric.md", "--checklist-file", "checklist.txt"],
       { cwd: outside, env: reviewEnv(logPath, { [B.verdictsEnv]: verdicts, [B.checklistItemsEnv]: "a" }) }
     ).stdout;
     const id = started.match(B.jobIdPattern)[1];
-    const finished = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
+    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
     assert.match(finished, /Status: completed/);
 
     const input = calls(logPath).at(-1).input;
@@ -658,7 +650,7 @@ function defineSuite(B) {
     assert.deepEqual(note.checklist_file, { path: checklistPath, sha256: digest(checklistText) });
     assert.doesNotMatch(JSON.stringify(task.session.ledger), /not worth keeping|First line shape/);
 
-    const cited = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    const cited = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
     assert.ok(cited.includes(`Coverage: 2 of 3 items have a verdict (1 keep, 1 finding); 1 missing\nVerdicts: ${verdictsPath}\n`));
     assert.ok(cited.indexOf("Coverage:") < cited.indexOf(`${findingId} [high]`));
     assert.match(cited, new RegExp(`${findingId} \\[high\\] Example defect — example\\.txt:1\\n  checklist items: a\\n`));
@@ -697,7 +689,7 @@ function defineSuite(B) {
       [["--checklist-file", checklist], `Invalid --checklist-file ${checklist}: line 3 repeats item a from line 1.`],
       [["--rubric-file", missing], `Cannot read --rubric-file ${missing}: no such file.`]
     ]) {
-      const result = command(process.execPath, [RUNTIME, "--dir", repo, "working", ...args], {
+      const result = command(process.execPath, [...ENTRY, "--dir", repo, "working", ...args], {
         cwd: repo,
         env: reviewEnv(fakeLogPath(repo)),
         allowFailure: true
@@ -755,7 +747,7 @@ function defineSuite(B) {
     const checklist = path.join(fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-failed-audit-`)), "checklist.txt");
     fs.writeFileSync(checklist, "a First line shape\nb Second line shape\n", "utf8");
     // A reply under another conversation ID fails the round after its verdicts were checked.
-    const failed = command(process.execPath, [RUNTIME, "--dir", repo, "again", "--checklist-file", checklist], {
+    const failed = command(process.execPath, [...ENTRY, "--dir", repo, "again", "--checklist-file", checklist], {
       cwd: repo,
       env: reviewEnv(logPath, {
         [B.verdictsEnv]: JSON.stringify([{ item: "a", verdict: "keep", note: "needed" }]),
@@ -769,10 +761,10 @@ function defineSuite(B) {
 
     const { job } = jobs(repo).find((entry) => entry.job.status === "failed");
     for (const key of ["coverage", "coverage_warning", "verdicts_file"]) assert.equal(job[key], undefined, key);
-    const status = command(process.execPath, [RUNTIME, "status", job.id, "--dir", repo]).stdout;
+    const status = command(process.execPath, [...ENTRY, "status", job.id, "--dir", repo]).stdout;
     assert.match(status, /^Status: failed$/m);
     assert.doesNotMatch(status, /^Coverage:|^Verdicts:|Checklist coverage is/m);
-    const cited = command(process.execPath, [RUNTIME, "cite", job.id, "--dir", repo]).stdout;
+    const cited = command(process.execPath, [...ENTRY, "cite", job.id, "--dir", repo]).stdout;
     assert.doesNotMatch(cited, /^Coverage:|^Verdicts:/m);
     assert.deepEqual(fs.readdirSync(job.task_directory).filter((name) => name.endsWith(".verdicts.json")), []);
     const artifact = fs.readFileSync(job.artifact, "utf8");
@@ -790,7 +782,7 @@ function defineSuite(B) {
     const logPath = fakeLogPath(repo);
     const result = command(
       process.execPath,
-      ["--import", INTERRUPT_AFTER_VERDICTS, RUNTIME, "--dir", repo, "working", "--checklist-file", checklist],
+      ["--import", INTERRUPT_AFTER_VERDICTS, ...ENTRY, "--dir", repo, "working", "--checklist-file", checklist],
       {
         cwd: repo,
         env: reviewEnv(logPath, {
@@ -816,7 +808,7 @@ function defineSuite(B) {
     assert.equal(job.status, "failed");
     for (const key of ["coverage", "coverage_warning", "verdicts_file"]) assert.equal(job[key], undefined, key);
     assert.deepEqual(verdictsFiles(job.task_directory), []);
-    assert.doesNotMatch(command(process.execPath, [RUNTIME, "status", job.id, "--dir", repo]).stdout, /^Coverage:|^Verdicts:/m);
+    assert.doesNotMatch(command(process.execPath, [...ENTRY, "status", job.id, "--dir", repo]).stdout, /^Coverage:|^Verdicts:/m);
   });
 
   test(`[${B.name}] recovering a worker that died after writing its verdicts file removes it`, () => {
@@ -827,7 +819,7 @@ function defineSuite(B) {
     assert.deepEqual(verdictsFiles(interrupted.task_directory), ["001-working.verdicts.json"]);
     assert.equal(fs.existsSync(interrupted.artifact), false);
 
-    const again = command(process.execPath, [RUNTIME, "--dir", repo, "again"], {
+    const again = command(process.execPath, [...ENTRY, "--dir", repo, "again"], {
       cwd: repo,
       env: reviewEnv(logPath),
       allowFailure: true
@@ -851,14 +843,14 @@ function defineSuite(B) {
     assert.equal(interrupted.verdicts_file, path.join(interrupted.task_directory, "001-working.verdicts.json"));
     assert.deepEqual(verdictsFiles(interrupted.task_directory), ["001-working.verdicts.json"]);
 
-    const cancelled = command(process.execPath, [RUNTIME, "cancel", interrupted.id, "--dir", repo]).stdout;
+    const cancelled = command(process.execPath, [...ENTRY, "cancel", interrupted.id, "--dir", repo]).stdout;
     assert.match(cancelled, new RegExp(`Job ${interrupted.id} had already stopped and is now failed\\. The review worker exited`));
     const recovered = JSON.parse(fs.readFileSync(jobFile, "utf8"));
     assert.equal(recovered.status, "failed");
     assert.equal(recovered.unapplied_artifact, interrupted.artifact);
     for (const key of ["coverage", "coverage_warning", "verdicts_file"]) assert.equal(recovered[key], undefined, key);
     assert.deepEqual(verdictsFiles(interrupted.task_directory), []);
-    const status = command(process.execPath, [RUNTIME, "status", interrupted.id, "--dir", repo]).stdout;
+    const status = command(process.execPath, [...ENTRY, "status", interrupted.id, "--dir", repo]).stdout;
     assert.match(status, /^Status: failed$/m);
     assert.doesNotMatch(status, /^Coverage:|^Verdicts:/m);
   });
@@ -871,18 +863,18 @@ function defineSuite(B) {
     const tip = git(repo, "rev-parse", "HEAD");
     runReview(repo, ["commit", "HEAD"], { [B.lineStartEnv]: "4", [B.lineEndEnv]: "5" });
     fs.writeFileSync(path.join(repo, "example.txt"), "changed after the review\n", "utf8");
-    const cited = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    const cited = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
     assert.match(cited, new RegExp(`Lines are read from the reviewed revision ${tip}\\.`));
     assert.match(cited, /F-[0-9a-f]{6} \[high\] Example defect — example\.txt:4-5\n  1 \| one\n  2 \| two\n  3 \| three\n> 4 \| four\n> 5 \| five\n  6 \| six\n  7 \| seven/);
     assert.doesNotMatch(cited, /changed after the review/);
 
     const beyond = runReview(repo, ["again"], { [B.lineStartEnv]: "40" });
     const beyondId = beyond.result.stdout.match(/\[HIGH\] (F-[0-9a-f]{6})/)[1];
-    const citedBeyond = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    const citedBeyond = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
     assert.match(citedBeyond, new RegExp(`${beyondId} \\[high\\] Example defect — example\\.txt:40\\n  unverifiable: line 40 is beyond the file's 7 lines`));
 
     const missing = runReview(repo, ["again"], { [B.fileEnv]: "nope.txt" });
-    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, new RegExp(`unverifiable: nope\\.txt is not present at ${tip}`));
+    assert.match(command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout, new RegExp(`unverifiable: nope\\.txt is not present at ${tip}`));
     assert.ok(missing.result.stdout.includes("Status: completed"));
   });
 
@@ -894,13 +886,13 @@ function defineSuite(B) {
     fs.writeFileSync(path.join(repo, "example.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\n", "utf8");
     const relative = path.relative(repo, path.join(outside, "hosts.yml"));
     runReview(repo, ["working"], { [B.fileEnv]: relative });
-    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, /unverifiable: the cited path is outside the repository/);
+    assert.match(command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout, /unverifiable: the cited path is outside the repository/);
     runReview(repo, ["again"], { [B.fileEnv]: "link/hosts.yml" });
-    const viaLink = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    const viaLink = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
     assert.match(viaLink, /unverifiable: the cited path resolves outside the repository/);
     assert.doesNotMatch(viaLink, /MARKER-OUTSIDE/);
     runReview(repo, ["again"], { [B.lineStartEnv]: "6", [B.lineEndEnv]: "40" });
-    const past = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    const past = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
     assert.match(past, /example\.txt:6-40\n  3 \| three\n  4 \| four\n  5 \| five\n> 6 \| six\n> 7 \| seven\n  cited range ends past the file's 7 lines here/);
   });
 
@@ -908,21 +900,21 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "ONE-EDITED\n", "utf8");
     runReview(repo, ["repo"], { [B.lineStartEnv]: "1" });
-    const repoCite = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    const repoCite = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
     assert.match(repoCite, /Lines are read from the working tree, unchanged since the review\./);
     assert.match(repoCite, /> 1 \| ONE-EDITED/);
     const tip = git(repo, "rev-parse", "HEAD");
     runReview(repo, ["commit", "HEAD", "--include-working"], { [B.lineStartEnv]: "1" });
-    const includeCite = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    const includeCite = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
     assert.match(includeCite, /> 1 \| ONE-EDITED/);
     assert.match(includeCite, new RegExp(`example\\.txt also differs at ${tip}; if the finding concerns the committed version, see \`git show ${tip}:example\\.txt\``));
     git(repo, "add", "example.txt");
     fs.writeFileSync(path.join(repo, "example.txt"), "ONE-EDITED-AGAIN\n", "utf8");
     runReview(repo, ["new", "working"], { [B.lineStartEnv]: "1" });
-    const stagedCite = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    const stagedCite = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
     assert.match(stagedCite, /> 1 \| ONE-EDITED-AGAIN\n  staged and unstaged versions of example\.txt differ; lines shown are the working copy, `git show :example\.txt` shows the index/);
     git(repo, "commit", "-qm", "commit the staged version");
-    const headMoved = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    const headMoved = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
     assert.match(headMoved, /which has changed since the review; treat differences as unverifiable/);
   });
 
@@ -930,11 +922,11 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     runReview(repo, ["working"], { [B.noFindingsEnv]: "1" });
-    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, /The reviewer reported no findings\./);
+    assert.match(command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout, /The reviewer reported no findings\./);
     const entry = jobs(repo)[0];
     delete entry.job.findings;
     fs.writeFileSync(entry.path, `${JSON.stringify(entry.job)}\n`, "utf8");
-    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, /No structured findings were recorded for this job; use result\./);
+    assert.match(command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout, /No structured findings were recorded for this job; use result\./);
 
     git(repo, "stash", "-q");
     git(repo, "checkout", "-q", "-b", "feature");
@@ -943,16 +935,16 @@ function defineSuite(B) {
     const featureId = feature.result.stdout.match(B.jobIdPattern)[1];
     git(repo, "checkout", "-q", "--", "example.txt");
     git(repo, "checkout", "-q", "main");
-    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, new RegExp(`review job: ${entry.job.id}`));
+    assert.match(command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout, new RegExp(`review job: ${entry.job.id}`));
     git(repo, "checkout", "-q", "feature");
-    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, new RegExp(`review job: ${featureId}`));
+    assert.match(command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout, new RegExp(`review job: ${featureId}`));
   });
 
   test(`[${B.name}] a reset during a running review is not overwritten by its result`, async () => {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = fakeLogPath(repo);
-    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
       env: reviewEnv(logPath, { [B.delayEnv]: "2500" })
     });
@@ -961,8 +953,8 @@ function defineSuite(B) {
       if (fs.existsSync(logPath) && calls(logPath).length === 1) break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    assert.match(command(process.execPath, [RUNTIME, "reset", "--dir", repo]).stdout, /Reset active/);
-    const finished = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
+    assert.match(command(process.execPath, [...ENTRY, "reset", "--dir", repo]).stdout, /Reset active/);
+    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
     assert.match(finished, /Status: completed/);
     const session = sessions(repo)[0].session;
     assert.equal(session.active, false);
@@ -985,16 +977,16 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\nmore\n", "utf8");
     runReview(repo, ["working"], { [B.lineStartEnv]: "2" });
-    const fresh = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    const fresh = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
     assert.match(fresh, /Lines are read from the working tree, unchanged since the review\./);
     assert.match(fresh, /  1 \| changed\n> 2 \| more\n$/);
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\nedited\n", "utf8");
-    const drifted = command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout;
+    const drifted = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
     assert.match(drifted, /which has changed since the review; treat differences as unverifiable/);
     assert.match(drifted, /> 2 \| edited\n  \(current working tree; may differ from what was reviewed\)/);
     const secret = runReview(repo, ["again"], { [B.fileEnv]: ".env" });
     assert.ok(secret.result.stdout.includes("Status: completed"));
-    assert.match(command(process.execPath, [RUNTIME, "cite", "--dir", repo]).stdout, /not shown: the path looks like a credential file/);
+    assert.match(command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout, /not shown: the path looks like a credential file/);
   });
 
   test(`[${B.name}] repo scope asks for pre-existing defects and drops the introduced-only rule`, () => {
@@ -1109,7 +1101,7 @@ function defineSuite(B) {
     git(repo, "merge", "--ff-only", "feature");
     const result = command(
       process.execPath,
-      [RUNTIME, "--dir", repo, "--resume-session", featureSessionId, "range", `${base}..${feature}`],
+      [...ENTRY, "--dir", repo, "--resume-session", featureSessionId, "range", `${base}..${feature}`],
       { cwd: repo, env: reviewEnv(first.logPath), allowFailure: true }
     );
 
@@ -1140,7 +1132,7 @@ function defineSuite(B) {
     const started = command(
       process.execPath,
       [
-        RUNTIME,
+        ...ENTRY,
         "--dir",
         repo,
         "--resume-session",
@@ -1181,7 +1173,7 @@ function defineSuite(B) {
     let status;
     for (let attempt = 0; attempt < 60; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 50));
-      status = command(process.execPath, [RUNTIME, "status", id, "--dir", repo]).stdout;
+      status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout;
       if (status.includes("Status: failed")) break;
     }
     assert.match(status, /Status: failed/);
@@ -1201,7 +1193,7 @@ function defineSuite(B) {
 
     const retry = command(
       process.execPath,
-      [RUNTIME, "--dir", repo, "--resume-session", original.session.session_id, "range", `${reviewed}..${fixed}`],
+      [...ENTRY, "--dir", repo, "--resume-session", original.session.session_id, "range", `${reviewed}..${fixed}`],
       { cwd: repo, env: reviewEnv(first.logPath), allowFailure: true }
     );
     assert.notEqual(retry.status, 0);
@@ -1213,7 +1205,7 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = fakeLogPath(repo);
-    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
       env: reviewEnv(logPath, { [B.delayEnv]: "1500" })
     });
@@ -1232,7 +1224,7 @@ function defineSuite(B) {
     try {
       for (let attempt = 0; attempt < 60; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 50));
-        status = command(process.execPath, [RUNTIME, "status", id, "--dir", repo]).stdout;
+        status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout;
         if (status.includes("Status: completed")) break;
       }
     } finally {
@@ -1253,7 +1245,7 @@ function defineSuite(B) {
     fs.writeFileSync(path.join(repo, "replacement.txt"), "replacement\n", "utf8");
     git(repo, "add", "replacement.txt");
     git(repo, "commit", "-m", "replacement history");
-    const result = command(process.execPath, [RUNTIME, "--dir", repo, "--resume-session", sessionId, "repo"], {
+    const result = command(process.execPath, [...ENTRY, "--dir", repo, "--resume-session", sessionId, "repo"], {
       cwd: repo,
       env: reviewEnv(path.join(repo, `fake-${B.name}.jsonl`)),
       allowFailure: true
@@ -1281,7 +1273,7 @@ function defineSuite(B) {
     git(repo, "commit", "-m", "later candidate");
     const result = command(
       process.execPath,
-      [RUNTIME, "--dir", repo, "--resume-session", sessionId, "range", `${base}..${base}`],
+      [...ENTRY, "--dir", repo, "--resume-session", sessionId, "range", `${base}..${base}`],
       { cwd: repo, env: reviewEnv(path.join(repo, `fake-${B.name}.jsonl`)), allowFailure: true }
     );
 
@@ -1313,7 +1305,7 @@ function defineSuite(B) {
     const later = git(repo, "rev-parse", "HEAD");
     const result = command(
       process.execPath,
-      [RUNTIME, "--dir", repo, "--resume-session", entry.session.session_id, "range", `${ambient}..${later}`],
+      [...ENTRY, "--dir", repo, "--resume-session", entry.session.session_id, "range", `${ambient}..${later}`],
       { cwd: repo, env: reviewEnv(first.logPath), allowFailure: true }
     );
 
@@ -1341,7 +1333,7 @@ function defineSuite(B) {
     fs.writeFileSync(path.join(repo, "example.txt"), "uncommitted distraction\n", "utf8");
     const result = command(
       process.execPath,
-      [RUNTIME, "--dir", repo, "--resume-session", session.session_id, "range", `${reviewed}..${fixed}`],
+      [...ENTRY, "--dir", repo, "--resume-session", session.session_id, "range", `${reviewed}..${fixed}`],
       { cwd: repo, env: reviewEnv(first.logPath), allowFailure: true }
     );
 
@@ -1360,7 +1352,7 @@ function defineSuite(B) {
     const unknownLog = path.join(unknownRepo, `fake-${B.name}.jsonl`);
     const unknown = command(
       process.execPath,
-      [RUNTIME, "--dir", unknownRepo, "--resume-session", "missing-session", "repo"],
+      [...ENTRY, "--dir", unknownRepo, "--resume-session", "missing-session", "repo"],
       { cwd: unknownRepo, env: reviewEnv(unknownLog), allowFailure: true }
     );
     assert.notEqual(unknown.status, 0);
@@ -1375,7 +1367,7 @@ function defineSuite(B) {
     runReview(resetRepo, ["reset"]);
     const reset = command(
       process.execPath,
-      [RUNTIME, "--dir", resetRepo, "--resume-session", sessionId, "repo"],
+      [...ENTRY, "--dir", resetRepo, "--resume-session", sessionId, "repo"],
       { cwd: resetRepo, env: reviewEnv(first.logPath), allowFailure: true }
     );
     assert.notEqual(reset.status, 0);
@@ -1395,7 +1387,7 @@ function defineSuite(B) {
     fs.writeFileSync(path.join(repo, "replacement.txt"), "replacement\n", "utf8");
     const result = command(
       process.execPath,
-      [RUNTIME, "--dir", repo, "--resume-session", sessionId, "repo"],
+      [...ENTRY, "--dir", repo, "--resume-session", sessionId, "repo"],
       { cwd: repo, env: reviewEnv(first.logPath), allowFailure: true }
     );
 
@@ -1423,7 +1415,7 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = fakeLogPath(repo);
-    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
       env: reviewEnv(logPath, { [B.delayEnv]: "150" })
     });
@@ -1433,11 +1425,11 @@ function defineSuite(B) {
     let status;
     for (let attempt = 0; attempt < 50; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 50));
-      status = command(process.execPath, [RUNTIME, "status", id, "--dir", repo]).stdout;
+      status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout;
       if (status.includes("Status: completed")) break;
     }
     assert.match(status, /Status: completed/);
-    const result = command(process.execPath, [RUNTIME, "result", id, "--dir", repo]).stdout;
+    const result = command(process.execPath, [...ENTRY, "result", id, "--dir", repo]).stdout;
     assert.match(result, /Example defect/);
   });
 
@@ -1459,7 +1451,7 @@ function defineSuite(B) {
     const started = command(
       process.execPath,
       [
-        RUNTIME,
+        ...ENTRY,
         "--dir",
         repo,
         "--resume-session",
@@ -1488,7 +1480,7 @@ function defineSuite(B) {
     let status;
     for (let attempt = 0; attempt < 50; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 50));
-      status = command(process.execPath, [RUNTIME, "status", id, "--dir", repo]).stdout;
+      status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout;
       if (status.includes("Status: failed")) break;
     }
     assert.match(status, /Status: failed/);
@@ -1547,7 +1539,7 @@ function defineSuite(B) {
     const started = command(
       process.execPath,
       [
-        RUNTIME,
+        ...ENTRY,
         "--dir",
         repo,
         "--resume-session",
@@ -1575,7 +1567,7 @@ function defineSuite(B) {
     let status;
     for (let attempt = 0; attempt < 60; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 50));
-      status = command(process.execPath, [RUNTIME, "status", id, "--dir", repo]).stdout;
+      status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout;
       if (status.includes("Status: failed")) break;
     }
     assert.match(status, /Status: failed/);
@@ -1594,13 +1586,13 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = path.join(repo, `fake-${B.name}.jsonl`);
-    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
       env: reviewEnv(logPath, { [B.delayEnv]: "1000" })
     });
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
-    const duplicate = command(process.execPath, [RUNTIME, "--dir", repo, "working"], {
+    const duplicate = command(process.execPath, [...ENTRY, "--dir", repo, "working"], {
       cwd: repo,
       env: reviewEnv(logPath),
       allowFailure: true
@@ -1609,7 +1601,7 @@ function defineSuite(B) {
     assert.match(duplicate.stderr, new RegExp(`job ${id} is already`));
     const jobs = fs.readdirSync(path.join(repo, ...B.artifactSegments, "jobs")).filter((name) => name.endsWith(".json"));
     assert.equal(jobs.length, 1);
-    command(process.execPath, [RUNTIME, "cancel", id, "--dir", repo]);
+    command(process.execPath, [...ENTRY, "cancel", id, "--dir", repo]);
   });
 
   test(`[${B.name}] an explicit session reports its in-flight focused review instead of starting another`, () => {
@@ -1629,19 +1621,19 @@ function defineSuite(B) {
     const logPath = fakeLogPath(repo);
     const started = command(
       process.execPath,
-      [RUNTIME, "--dir", repo, "--resume-session", sessionId, "range", `${reviewed}..${fixed}`, "--background"],
+      [...ENTRY, "--dir", repo, "--resume-session", sessionId, "range", `${reviewed}..${fixed}`, "--background"],
       { cwd: repo, env: reviewEnv(logPath, { [B.delayEnv]: "1000" }) }
     );
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
     const duplicate = command(
       process.execPath,
-      [RUNTIME, "--dir", repo, "--resume-session", sessionId, "range", `${reviewed}..${fixed}`],
+      [...ENTRY, "--dir", repo, "--resume-session", sessionId, "range", `${reviewed}..${fixed}`],
       { cwd: repo, env: reviewEnv(logPath), allowFailure: true }
     );
     assert.notEqual(duplicate.status, 0);
     assert.match(duplicate.stderr, new RegExp(`job ${id} is already`));
-    command(process.execPath, [RUNTIME, "cancel", id, "--dir", repo]);
+    command(process.execPath, [...ENTRY, "cancel", id, "--dir", repo]);
   });
 
   test(`[${B.name}] a stale queued job that crashed before recording a PID self-heals`, () => {
@@ -1666,7 +1658,7 @@ function defineSuite(B) {
       task_directory: originalJob.task_directory,
       scope: { kind: "working" }
     })}\n`, "utf8");
-    const legacyStatus = command(process.execPath, [RUNTIME, "status", "review-stale", "--dir", repo]).stdout;
+    const legacyStatus = command(process.execPath, [...ENTRY, "status", "review-stale", "--dir", repo]).stdout;
     assert.match(legacyStatus, new RegExp(`Session ID: ${task.session.session_id}`));
     runReview(repo, ["again"]);
     const stale = JSON.parse(fs.readFileSync(stalePath, "utf8"));
@@ -1704,7 +1696,7 @@ function defineSuite(B) {
       verdicts_file: path.join(acceptedJob.task_directory, "002-working.verdicts.json")
     })}\n`, "utf8");
 
-    const again = command(process.execPath, [RUNTIME, "--dir", repo, "again"], {
+    const again = command(process.execPath, [...ENTRY, "--dir", repo, "again"], {
       cwd: repo,
       env: reviewEnv(first.logPath),
       allowFailure: true
@@ -1739,7 +1731,7 @@ function defineSuite(B) {
   test(`[${B.name}] a round that fails after writing its artifact records it as unapplied`, () => {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
-    const result = command(process.execPath, ["--import", FAIL_SESSION_AFTER_ARTIFACT, RUNTIME, "--dir", repo], {
+    const result = command(process.execPath, ["--import", FAIL_SESSION_AFTER_ARTIFACT, ...ENTRY, "--dir", repo], {
       cwd: repo,
       env: reviewEnv(fakeLogPath(repo)),
       allowFailure: true,
@@ -1793,7 +1785,7 @@ function defineSuite(B) {
     const resumed = command(
       process.execPath,
       [
-        RUNTIME,
+        ...ENTRY,
         "--dir",
         repo,
         "--resume-session",
@@ -1844,7 +1836,7 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = fakeLogPath(repo);
-    const killed = command(process.execPath, ["--import", KILL_BEFORE_APPLY, RUNTIME, "--dir", repo, "working"], {
+    const killed = command(process.execPath, ["--import", KILL_BEFORE_APPLY, ...ENTRY, "--dir", repo, "working"], {
       cwd: repo,
       env: reviewEnv(logPath),
       allowFailure: true,
@@ -1857,7 +1849,7 @@ function defineSuite(B) {
     assert.ok(interrupted.rendered_result);
     assert.ok(fs.existsSync(interrupted.artifact));
 
-    const cancelled = command(process.execPath, [RUNTIME, "cancel", interrupted.id, "--dir", repo]).stdout;
+    const cancelled = command(process.execPath, [...ENTRY, "cancel", interrupted.id, "--dir", repo]).stdout;
     const recovered = JSON.parse(fs.readFileSync(jobFile, "utf8"));
     assert.equal(recovered.status, "failed");
     assert.match(recovered.error, /^The review worker exited before recording a terminal result\. .*session was retired/);
@@ -1872,7 +1864,7 @@ function defineSuite(B) {
     assert.equal(retired.review_count, 0);
     assert.match(cancelled, new RegExp(`Job ${interrupted.id} had already stopped and is now failed\\. The review worker exited`));
 
-    const again = command(process.execPath, [RUNTIME, "--dir", repo, "again"], {
+    const again = command(process.execPath, [...ENTRY, "--dir", repo, "again"], {
       cwd: repo,
       env: reviewEnv(logPath),
       allowFailure: true
@@ -1893,7 +1885,7 @@ function defineSuite(B) {
     completed.job.pid = 2_147_483_647;
     fs.writeFileSync(completed.path, `${JSON.stringify(completed.job)}\n`, "utf8");
 
-    const cancelled = command(process.execPath, [RUNTIME, "cancel", completed.job.id, "--dir", repo]).stdout;
+    const cancelled = command(process.execPath, [...ENTRY, "cancel", completed.job.id, "--dir", repo]).stdout;
     const recovered = JSON.parse(fs.readFileSync(completed.path, "utf8"));
     assert.equal(recovered.status, "completed");
     assert.equal(recovered.error, null);
@@ -1937,7 +1929,7 @@ function defineSuite(B) {
 
     const status = command(
       process.execPath,
-      [RUNTIME, "status", "review-legacy-outside", "--dir", repo]
+      [...ENTRY, "status", "review-legacy-outside", "--dir", repo]
     ).stdout;
     assert.match(status, /Session ID: unknown/);
     assert.doesNotMatch(status, /outside-session/);
@@ -1957,7 +1949,7 @@ function defineSuite(B) {
     })}\n`, "utf8");
     const linkedInsideStatus = command(
       process.execPath,
-      [RUNTIME, "status", "review-legacy-inside-link", "--dir", repo]
+      [...ENTRY, "status", "review-legacy-inside-link", "--dir", repo]
     ).stdout;
     assert.match(linkedInsideStatus, /Session ID: unknown/);
     assert.doesNotMatch(linkedInsideStatus, new RegExp(canonicalTask.session.session_id));
@@ -1977,7 +1969,7 @@ function defineSuite(B) {
     })}\n`, "utf8");
     const linkedFileStatus = command(
       process.execPath,
-      [RUNTIME, "status", "review-legacy-linked-file", "--dir", repo]
+      [...ENTRY, "status", "review-legacy-linked-file", "--dir", repo]
     ).stdout;
     assert.match(linkedFileStatus, /Session ID: unknown/);
     assert.doesNotMatch(linkedFileStatus, /outside-session/);
@@ -2003,7 +1995,7 @@ function defineSuite(B) {
     })}\n`, "utf8");
     const mismatchedStatus = command(
       process.execPath,
-      [RUNTIME, "status", "review-legacy-mismatched", "--dir", repo]
+      [...ENTRY, "status", "review-legacy-mismatched", "--dir", repo]
     ).stdout;
     assert.match(mismatchedStatus, /Session ID: unknown/);
     assert.doesNotMatch(mismatchedStatus, /mismatched-session/);
@@ -2185,7 +2177,7 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = path.join(repo, `fake-${B.name}.jsonl`);
-    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
       env: reviewEnv(logPath, { [B.delayEnv]: "5000" })
     });
@@ -2196,7 +2188,7 @@ function defineSuite(B) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.equal(calls(logPath).length, 1);
-    command(process.execPath, [RUNTIME, "cancel", id, "--dir", repo]);
+    command(process.execPath, [...ENTRY, "cancel", id, "--dir", repo]);
 
     let job;
     const jobFile = path.join(repo, ...B.artifactSegments, "jobs", `${id}.json`);
@@ -2215,7 +2207,7 @@ function defineSuite(B) {
     const task = sessions(repo)[0];
     assert.equal(task.session.active, false);
     assert.ok(task.session.retired_at);
-    const again = command(process.execPath, [RUNTIME, "--dir", repo, "again"], {
+    const again = command(process.execPath, [...ENTRY, "--dir", repo, "again"], {
       cwd: repo,
       env: reviewEnv(logPath),
       allowFailure: true
@@ -2227,14 +2219,14 @@ function defineSuite(B) {
   test(`[${B.name}] a review without --timeout-minutes records no deadline and runs to completion`, () => {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
-    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
       env: reviewEnv(fakeLogPath(repo), { [B.delayEnv]: "1500" })
     });
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
     assert.equal(jobs(repo)[0].job.timeout_minutes, null);
-    const finished = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
+    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
       cwd: repo,
       timeout: 30_000
     }).stdout;
@@ -2248,14 +2240,14 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = fakeLogPath(repo);
-    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background", "--timeout-minutes", "0.1"], {
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background", "--timeout-minutes", "0.1"], {
       cwd: repo,
       env: reviewEnv(logPath, { [B.delayEnv]: "60000" })
     });
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
     assert.equal(jobs(repo)[0].job.timeout_minutes, 0.1);
-    const finished = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
+    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
       cwd: repo,
       timeout: 30_000
     }).stdout;
@@ -2275,7 +2267,7 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = fakeLogPath(repo);
-    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
       env: reviewEnv(logPath, { [B.delayEnv]: "60000", [B.ignoreSigtermEnv]: "1" })
     });
@@ -2286,7 +2278,7 @@ function defineSuite(B) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     const { pid } = calls(logPath)[0];
-    command(process.execPath, [RUNTIME, "cancel", id, "--dir", repo]);
+    command(process.execPath, [...ENTRY, "cancel", id, "--dir", repo]);
 
     let job;
     const jobFile = path.join(repo, ...B.artifactSegments, "jobs", `${id}.json`);
@@ -2309,9 +2301,9 @@ function defineSuite(B) {
     assert.notEqual(failed.result.status, 0);
     const replacement = runReview(repo);
     assert.match(replacement.result.stdout, /Previous session .* was retired/);
-    command(process.execPath, [RUNTIME, "--dir", repo, "reset"], { cwd: repo });
+    command(process.execPath, [...ENTRY, "--dir", repo, "reset"], { cwd: repo });
 
-    const again = command(process.execPath, [RUNTIME, "--dir", repo, "again"], {
+    const again = command(process.execPath, [...ENTRY, "--dir", repo, "again"], {
       cwd: repo,
       env: reviewEnv(failed.logPath),
       allowFailure: true
@@ -2327,7 +2319,7 @@ function defineSuite(B) {
   test(`[${B.name}] again without an active review does not leak an empty task`, () => {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
-    const result = command(process.execPath, [RUNTIME, "--dir", repo, "again"], {
+    const result = command(process.execPath, [...ENTRY, "--dir", repo, "again"], {
       cwd: repo,
       env: reviewEnv(path.join(repo, `fake-${B.name}.jsonl`)),
       allowFailure: true
@@ -2360,13 +2352,13 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = fakeLogPath(repo);
-    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
       env: reviewEnv(logPath, { [B.delayEnv]: "1200" })
     });
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
-    const waited = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
+    const waited = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
       cwd: repo,
       timeout: 30_000
     });
@@ -2383,7 +2375,7 @@ function defineSuite(B) {
     const entry = sessions(repo)[0];
     entry.session.conversation_id = null;
     fs.writeFileSync(path.join(entry.directory, "session.json"), `${JSON.stringify(entry.session, null, 2)}\n`, "utf8");
-    const again = command(process.execPath, [RUNTIME, "--dir", repo, "again"], {
+    const again = command(process.execPath, [...ENTRY, "--dir", repo, "again"], {
       cwd: repo,
       env: reviewEnv(first.logPath),
       allowFailure: true
@@ -2398,7 +2390,7 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = fakeLogPath(repo);
-    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
       env: reviewEnv(logPath, { [B.delayEnv]: "2500" })
     });
@@ -2407,12 +2399,12 @@ function defineSuite(B) {
     let status = "";
     for (let attempt = 0; attempt < 100; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 50));
-      status = command(process.execPath, [RUNTIME, "status", id, "--dir", repo]).stdout;
+      status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout;
       if (/Status: running/.test(status) && new RegExp(`${B.conversationLabel}: [0-9a-f-]{36}`).test(status)) break;
     }
     assert.match(status, /Status: running/);
     assert.match(status, new RegExp(`${B.conversationLabel}: [0-9a-f-]{36}`));
-    const finished = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
+    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
       cwd: repo,
       timeout: 30_000
     }).stdout;
@@ -2420,13 +2412,13 @@ function defineSuite(B) {
     const threadId = calls(logPath)[0].conversationId;
     assert.match(finished, new RegExp(`${B.conversationLabel}: ${threadId}`));
 
-    const again = command(process.execPath, [RUNTIME, "--dir", repo, "again", "--background"], {
+    const again = command(process.execPath, [...ENTRY, "--dir", repo, "again", "--background"], {
       cwd: repo,
       env: reviewEnv(logPath, { [B.delayEnv]: "1500" })
     }).stdout;
     assert.match(again, new RegExp(`${B.conversationLabel}: ${threadId}`));
     const againId = again.match(B.jobIdPattern)?.[1];
-    command(process.execPath, [RUNTIME, "result", againId, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 });
+    command(process.execPath, [...ENTRY, "result", againId, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 });
   });
 
   test(`[${B.name}] state written by an older plugin version is ignored with a notice`, () => {
@@ -2458,7 +2450,7 @@ function defineSuite(B) {
       scope: { kind: "working" }
     })}\n`, "utf8");
 
-    const status = command(process.execPath, [RUNTIME, "status", "--dir", repo], { cwd: repo });
+    const status = command(process.execPath, [...ENTRY, "status", "--dir", repo], { cwd: repo });
     assert.doesNotMatch(status.stdout, /review-legacy/);
     assert.match(status.stderr, /Ignoring 1 job written by an older version/);
     const again = runReview(repo, ["again"]);
@@ -2523,7 +2515,7 @@ function defineSuite(B) {
     const artifact = fs.readFileSync(job.artifact, "utf8");
     assert.match(artifact, /## Warning\n\nThe checkout changed during the review/);
     assert.match(artifact, /## Error/);
-    const status = command(process.execPath, [RUNTIME, "status", job.id, "--dir", repo]).stdout;
+    const status = command(process.execPath, [...ENTRY, "status", job.id, "--dir", repo]).stdout;
     assert.match(status, /Warning: The checkout changed during the review/);
   });
 
@@ -2587,13 +2579,13 @@ function defineSuite(B) {
   test(`[${B.name}] the resume hint appears only once the reviewer has started`, () => {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
-    const started = command(process.execPath, [RUNTIME, "--dir", repo, "working", "--background"], {
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
       env: reviewEnv(fakeLogPath(repo), { [B.delayEnv]: "1500" })
     }).stdout;
     assert.doesNotMatch(started, /Resume interactively/);
     const id = started.match(B.jobIdPattern)?.[1];
-    const finished = command(process.execPath, [RUNTIME, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
+    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
     assert.match(finished, /Status: completed/);
     assert.match(finished, /Resume interactively: /);
   });
@@ -2610,6 +2602,94 @@ function defineSuite(B) {
     assert.equal(task.session.active, false);
     assert.ok(task.session.retired_at);
   });
+
+  function changedRepo() {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    return repo;
+  }
+
+  function runAs(repo, args, env) {
+    return command(process.execPath, [...ENTRY, "--dir", repo, ...args], { cwd: repo, env: reviewEnv(fakeLogPath(repo), env), allowFailure: true });
+  }
+
+  test(`[${B.name}] the host's own agent is refused as the reviewer unless allowed, before anything is recorded`, () => {
+    const repo = changedRepo();
+    const refused = runAs(repo, ["working"], B.hostEnv);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, new RegExp(`${B.label} is the agent running this, so this would be a self-review.*--allow-self`));
+    assert.equal(fs.existsSync(path.join(repo, ...B.artifactSegments)), false);
+
+    const allowed = runAs(repo, ["working", "--allow-self"], B.hostEnv);
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.match(allowed.stdout, /Status: completed/);
+    for (const action of ["status", "result", "cite"]) assert.equal(runAs(repo, [action], B.hostEnv).status, 0, action);
+  });
+
+  test(`[${B.name}] a reviewer cannot start another review, even when self-review is allowed`, () => {
+    const repo = changedRepo();
+    const refused = runAs(repo, ["working", "--allow-self"], { CROSS_REVIEW_DEPTH: "1" });
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /a reviewer cannot start another review/);
+    assert.equal(fs.existsSync(path.join(repo, ...B.artifactSegments)), false);
+  });
+
+  test(`[${B.name}] a reviewer cannot run a saved job again through the internal entry`, () => {
+    const repo = changedRepo();
+    const { logPath } = runReview(repo, ["working"]);
+    const refused = command(process.execPath, [...ENTRY, "__run-job", jobs(repo)[0].job.id, "--dir", repo], {
+      cwd: repo,
+      env: reviewEnv(logPath, { CROSS_REVIEW_DEPTH: "1" }),
+      allowFailure: true
+    });
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /a reviewer cannot start another review/);
+    assert.equal(calls(logPath).length, 1);
+  });
+
+  test(`[${B.name}] a review inside a sandbox with no network fails with the way out`, () => {
+    const repo = changedRepo();
+    const refused = runAs(repo, ["working"], { CODEX_SANDBOX_NETWORK_DISABLED: "1" });
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, new RegExp(`no network access, so ${B.label} could not reach its API.*danger-full-access`));
+    assert.equal(fs.existsSync(path.join(repo, ...B.artifactSegments)), false);
+  });
+
+  test(`[${B.name}] the reviewer inherits no host variables and is marked as a reviewer`, () => {
+    const repo = changedRepo();
+    const { logPath } = runReview(repo, ["working", "--allow-self"], { ...B.hostEnv, CODEX_SANDBOX: "seatbelt" });
+    const invocation = calls(logPath).at(-1);
+    assert.deepEqual(invocation.hostVariables, []);
+    assert.equal(invocation.reviewDepth, "1");
+  });
+
+  test(`[${B.name}] without a named reviewer the only other reviewer is used`, () => {
+    const repo = changedRepo();
+    const other = BACKENDS.find((candidate) => candidate !== B);
+    const logPath = fakeLogPath(repo);
+    const result = command(process.execPath, [ENTRY_SCRIPT, "--dir", repo, "working"], { cwd: repo, env: reviewEnv(logPath, other.hostEnv) });
+    assert.match(result.stdout, /Status: completed/);
+    assert.equal(calls(logPath).length, 1);
+
+    const unnamed = command(process.execPath, [ENTRY_SCRIPT, "--dir", repo, "working"], { cwd: repo, env: reviewEnv(logPath), allowFailure: true });
+    assert.notEqual(unnamed.status, 0);
+    assert.match(unnamed.stderr, /Name a reviewer as the first argument: codex or claude/);
+    assert.equal(calls(logPath).length, 1);
+    assert.match(command(process.execPath, [ENTRY_SCRIPT, "--help"], { env: reviewEnv(logPath) }).stdout, /^Cross Review\n/);
+  });
+
+  test(`[${B.name}] the prompt and the checkout check leave every reviewer's artifacts alone`, () => {
+    const repo = changedRepo();
+    const other = BACKENDS.find((candidate) => candidate !== B);
+    // Without the user's global excludes, a new artifact directory shows up as a
+    // newly ignored path, as it would on a machine that does not ignore tmp/.
+    git(repo, "config", "core.excludesFile", "/dev/null");
+    fs.appendFileSync(path.join(repo, ".git", "info", "exclude"), `${other.artifactDir}/\n`, "utf8");
+    const { result, logPath } = runReview(repo, ["working"], { [B.writeFileEnv]: `${other.artifactDir}/session.json` });
+    assert.doesNotMatch(result.stdout, /Warning: The checkout changed/);
+    const { input } = calls(logPath).at(-1);
+    for (const candidate of BACKENDS) assert.match(input, new RegExp(`Do not review [^.]*${candidate.artifactDir}`));
+  });
 }
 
-export { BACKENDS, command, git, calls, defineSuite };
+export { BACKENDS, ENTRY_SCRIPT, command, git, calls, defineSuite };

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Cross Review"
+  short_description: "Persistent, scoped code reviews from another agent"
+  default_prompt: "Use $cross-review to ask Claude to review my current working changes."
+policy:
+  allow_implicit_invocation: true

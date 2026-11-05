@@ -1,69 +1,100 @@
 # Cross Review
 
-Two plugins that let each coding agent ask the other for a code review of an exact Git scope, keeping one persistent reviewer conversation per repository and branch session so a re-review remembers earlier findings and your decisions about them.
+A plugin that lets one coding agent ask a different one for a code review of an exact Git scope, keeping one persistent reviewer conversation per repository and branch session so a re-review remembers earlier findings and your decisions about them.
 
-| Plugin | Host | Reviewer | Invoke |
-| --- | --- | --- | --- |
-| `codex-review` | Claude Code | Codex | ask naturally, or `/codex-review:codex-review` |
-| `claude-review` | Codex | Claude Code | ask naturally, or `$claude-review` |
+| Host | Reviewers | Invoke |
+| --- | --- | --- |
+| Claude Code | Codex | ask naturally, or `/cross-review codex branch main` |
+| Codex | Claude Code | ask naturally, or `$cross-review claude branch main` |
+| Antigravity CLI (`agy`) | Codex, Claude Code | ask naturally |
 
-Both share the same session model: explicit scopes (`working`, `branch [base]`, `commit [ref]`, `range <from>..<to>`, `repo`), `again` to re-review in the same conversation, `--resume-session` for exact resumes across branch identity changes, detached background jobs with `status`, `result`, and `cancel`, secret-filtered Git context on stdin, and a JSON-schema-enforced result. The roadmap that merges the two runtimes into one shared core is in [docs/unification-plan.md](docs/unification-plan.md).
+Every reviewer shares the same session model: explicit scopes (`working`, `branch [base]`, `commit [ref]`, `range <from>..<to>`, `repo`), `again` to re-review in the same conversation, `--resume-session` for exact resumes across branch identity changes, detached background jobs with `status`, `result`, and `cancel`, secret-filtered Git context on stdin, and a JSON-schema-enforced result. How this came to be one plugin is in [docs/unification-plan.md](docs/unification-plan.md).
 
-## codex-review (Claude Code asks Codex)
+## Install
 
-Requirements: Claude Code with plugin support (tested with 2.1.273), Codex CLI 0.136 or newer installed and logged in (tested with 0.153.4), Node.js 18.18 or newer, Git.
-
-```text
-/plugin marketplace add raghubetina/cross-review
-/plugin install codex-review@cross-review
-```
-
-Or from a shell: `claude plugin marketplace add raghubetina/cross-review` then `claude plugin install codex-review@cross-review`. During development: `claude --plugin-dir /absolute/path/to/cross-review/plugins/codex-review`.
-
-Reviews run as detached background jobs by default because Claude Code caps each Bash call and a max-effort review often outlasts it; `result --wait` blocks for up to `--wait-minutes` (default 5) and can be called again. Every result prints a plugin session ID and the Codex thread ID, which `codex resume <thread-id>` opens interactively. Artifacts live in the reviewed repository's ignored `tmp/codex_reviews/` directory.
-
-Details: [SKILL.md](plugins/codex-review/skills/codex-review/SKILL.md) and [interface.md](plugins/codex-review/skills/codex-review/references/interface.md).
-
-## claude-review (Codex asks Claude Code)
-
-Requirements: Codex with plugin support, Claude Code 2.1.205 or newer installed and authenticated, Node.js 18.18 or newer, Git.
+Requirements: Node.js 18.18 or newer, Git, your host, and the CLI of each reviewer you will use, installed and logged in: Codex CLI 0.136 or newer, Claude Code 2.1.205 or newer. Tested with Codex CLI 0.166.0, Claude Code 2.1.318, and Antigravity CLI 1.5.1.
 
 ```sh
+# Claude Code
+claude plugin marketplace add raghubetina/cross-review
+claude plugin install cross-review@cross-review
+
+# Codex
 codex plugin marketplace add raghubetina/cross-review
-codex plugin add claude-review@cross-review
+codex plugin add cross-review@cross-review
+
+# Antigravity CLI
+agy plugin install https://github.com/raghubetina/cross-review/tree/main/plugins/cross-review
 ```
 
-During local development: `codex plugin marketplace add /absolute/path/to/cross-review` then the same `codex plugin add`. After installation, start a new Codex process; in the ChatGPT desktop app, fully quit and reopen it so it rescans marketplaces. In Codex CLI, invoke the skill with `$claude-review`; `/claude-review` is not a slash command.
+During development: `claude --plugin-dir /absolute/path/to/cross-review/plugins/cross-review`, or `codex plugin marketplace add /absolute/path/to/cross-review` then the same `codex plugin add`, or `agy plugin install /absolute/path/to/cross-review/plugins/cross-review`.
 
-Reviews default to maximum reasoning effort and can run in the background; `result --wait` blocks for up to `--wait-minutes` (default 5). Claude receives a bounded, secret-filtered Git context over stdin. Every result prints a plugin session ID and the Claude session ID, which `claude --resume <session-id>` opens interactively. Artifacts live in the reviewed repository's ignored `tmp/claude_reviews/` directory.
+After installing in Codex, start a new Codex process; in the ChatGPT desktop app, fully quit and reopen it so it rescans marketplaces. In Codex CLI, invoke the skill with `$cross-review`; `/cross-review` is not a slash command.
 
-Details: [SKILL.md](plugins/claude-review/skills/claude-review/SKILL.md) and [interface.md](plugins/claude-review/skills/claude-review/references/interface.md).
+In Antigravity CLI, `agy -p` runs only the commands an allow rule permits, and one it refuses ends the turn with an empty result, so allow `node` when you script it. Do not host reviews under `agy --sandbox`, because the reviewer needs the network and its own state.
+
+Inside a Codex sandbox with no network, the runtime refuses to start a review and says why, because the reviewer could not reach its API. A sandbox with network access can also fail to write to `.git/info/exclude`, where the runtime records its artifact directory.
+
+## Use
+
+The reviewer comes first on the command line. If you name none, the runtime uses the only reviewer other than the agent it runs inside; on `agy`, which has two, it asks you to choose. A review by the agent it runs inside is refused, since that agent's own review command does the job, unless you pass `--allow-self`. A reviewer cannot start another review; the one way around that is a Codex reviewer whose `shell_environment_policy.include_only` leaves out the runtime's `CROSS_REVIEW_DEPTH` marker.
+
+Reviews run as detached background jobs because a max-effort review often outlasts a host's per-call time limit; `result --wait` blocks for up to `--wait-minutes` (default 5) and can be called again. Every result prints a plugin session ID and the reviewer's conversation ID, which `codex resume <thread-id>` or `claude --resume <session-id>` opens interactively. Artifacts live in the reviewed repository's ignored `tmp/codex_reviews/` and `tmp/claude_reviews/` directories, and each reviewer keeps its own sessions and ledger.
+
+Details: [SKILL.md](plugins/cross-review/skills/cross-review/SKILL.md) and [interface.md](plugins/cross-review/skills/cross-review/references/interface.md).
+
+## Antigravity and Google's terms
+
+An `agy` reviewer is planned but not included yet, and it will run only after you opt in, because Google's own texts conflict on this use. The [FAQ](https://antigravity.google/docs/faq) says "Wrapping `agy` inside third-party coding agents or applications, or automating account rotation, is not supported under consumer plans" and recommends a Gemini Enterprise or Google AI Studio API key for third-party coding agents. Item 6 of the [terms](https://antigravity.google/terms) names suspension or termination for using third-party software to access the service. A [forum moderator](https://discuss.ai.google.dev/t/is-invoking-the-official-agy-cli-from-a-local-ai-coding-assistant-allowed-on-an-individual-google-ai-account/185992) has called spawning the unmodified binary locally for your own use "a supported use of the CLI", but a follow-up asking whether that is Google's official reading has no answer.
+
+This plugin running inside `agy` and calling Codex or Claude does not wrap `agy`, but item 6 also covers using the service "in connection with products not provided by us", so read the terms yourself. Item 5 says Google staff may review what you submit unless you change a setting, so check that before working on private code.
+
+## Moving from codex-review and claude-review
+
+The two earlier plugins became this one in 0.9.0. Review sessions carry over, because artifacts stay where they were. On each machine:
+
+```sh
+# Claude Code: the marketplace's rename rewrites your settings, but the plugin still needs installing
+claude plugin marketplace update cross-review
+claude plugin list
+claude plugin install cross-review@cross-review
+
+# Codex: there is no rename, so let running reviews finish first
+codex plugin marketplace upgrade cross-review
+codex plugin add cross-review@cross-review
+codex plugin remove claude-review@cross-review
+```
+
+Restart Claude Code and start a new Codex session afterward. In a project that enables the plugin, commit the `.claude/settings.json` that Claude Code rewrites, and change the key in `.codex/config.toml` by hand, because Codex ignores a stale key without saying so.
 
 ## Update
 
-Both hosts install a copy of the plugin, and both decide whether to fetch a new one by the version in the plugin manifest, so a change pushed without a version bump never reaches an installed copy. For example, 707adc0 removed the 30-minute default deadline without a bump, and copies of 0.7.2 installed before it kept that deadline.
+Hosts install a copy of the plugin, and decide whether to fetch a new one by the version in the plugin manifest, so a change pushed without a version bump never reaches an installed copy. For example, 707adc0 removed the 30-minute default deadline without a bump, and copies of 0.7.2 installed before it kept that deadline.
 
-A release therefore sets one new version in `plugins/codex-review/.claude-plugin/plugin.json`, `plugins/claude-review/.codex-plugin/plugin.json`, and both version fields of `.claude-plugin/marketplace.json`, then runs `npm run build`. The build records a digest of each plugin's shipped files for the new version in `scripts/plugin-digests.json`; a manifest's own version is left out of its digest. `npm test` fails when the manifests disagree on the version, or when a plugin's shipped files differ from the digests recorded for that version. The build never records digests for a version that the record on `origin/main` lists with other digests, since a version listed there may already be installed; until the first push, it records a version's digests again after each fix.
+A release therefore sets one new version in the three manifests under `plugins/cross-review/` and in `metadata.version` of `.claude-plugin/marketplace.json`, then runs `npm run build`. The build records a digest of the plugin's shipped files for the new version in `scripts/plugin-digests.json`; each manifest's own version is left out of its digest. `npm test` fails when the manifests disagree on the version, or when the shipped files differ from the digests recorded for that version. The build never records digests for a version that the record on `origin/main` lists with other digests, since a version listed there may already be installed; until the first push, it records a version's digests again after each fix.
 
 Then, on each machine:
 
 ```sh
 # Claude Code
 claude plugin marketplace update cross-review
-claude plugin update codex-review@cross-review
+claude plugin update cross-review@cross-review
 
 # Codex
 codex plugin marketplace upgrade cross-review
-codex plugin add claude-review@cross-review
+codex plugin add cross-review@cross-review
+
+# Antigravity CLI, which has no update command: installing again replaces the copy
+agy plugin install https://github.com/raghubetina/cross-review/tree/main/plugins/cross-review
 ```
 
 Restart Claude Code and start a new Codex session afterward; each loads plugins at startup.
 
-## Session semantics, shared by both
+## Session semantics
 
 `again` repeats the previous scope in the current branch session. `--resume-session <session-id>` is the explicit exact-scope path for resuming an active session when branch identity changes. It requires a clean, committed scope; the stored tip must remain an ancestor of the current HEAD, the requested scope tip must equal that HEAD, and no other active session may own the destination checkout identity. Only this explicit-resume path samples the checkout's named-or-detached identity, HEAD, and cleanliness before invoking the reviewer and before applying the result. Leave that checkout untouched while the review runs; a transient change restored between samples cannot be detected.
 
-A review has no deadline unless `--timeout-minutes` sets one. Once a reviewer process starts, any error, timeout, cancellation, worker death, checkout mismatch, malformed result, or persistence failure that prevents its result from being applied retires the plugin session at its last accepted scope and HEAD. Cancellation therefore ends continuity. `again` explains why a retired session cannot resume; an ordinary review starts a new isolated session and reports that transition. `new` starts a fresh session, and `reset` forgets the active session without deleting its artifacts. If necessary, each plugin adds its artifact directory to Git's local `info/exclude`; neither modifies the tracked `.gitignore`.
+A review has no deadline unless `--timeout-minutes` sets one. Once a reviewer process starts, any error, timeout, cancellation, worker death, checkout mismatch, malformed result, or persistence failure that prevents its result from being applied retires the plugin session at its last accepted scope and HEAD. Cancellation therefore ends continuity. `again` explains why a retired session cannot resume; an ordinary review starts a new isolated session and reports that transition. `new` starts a fresh session, and `reset` forgets the active session without deleting its artifacts. If necessary, the runtime adds a reviewer's artifact directory to Git's local `info/exclude`; it never modifies the tracked `.gitignore`.
 
 ## Result format
 
@@ -75,7 +106,7 @@ Text after `--` is the review focus: what to look at, feedback on the last round
 
 ## Audit
 
-Two more options turn a review into a line-by-line audit, for example of machine-generated code, where the usual question is whether each line is worth keeping. They are independent, and each applies to one round only, so pass them again on every round that should use them. A round with either option also reviews generated files in the resolved scope, which an ordinary review skips, since the line under audit or the claim under verification may be in one. Every other checkout rule stays: the artifact directory, `.git`, dependency and vendor trees, and credential files remain off limits, and the reviewer still writes only to scratch and never commits or pushes. As runtime arguments for either plugin:
+Two more options turn a review into a line-by-line audit, for example of machine-generated code, where the usual question is whether each line is worth keeping. They are independent, and each applies to one round only, so pass them again on every round that should use them. A round with either option also reviews generated files in the resolved scope, which an ordinary review skips, since the line under audit or the claim under verification may be in one. Every other checkout rule stays: the artifact directories, `.git`, dependency and vendor trees, and credential files remain off limits, and the reviewer still writes only to scratch and never commits or pushes. As runtime arguments after the reviewer:
 
 ```text
 new repo --background --rubric-file audit/rubric.md --checklist-file audit/checklist.txt
@@ -102,7 +133,7 @@ A change of at most 256 KB and 40 files is inlined, untracked files included up 
 
 ## The host double-checks before relaying
 
-Both skills tell the host agent to run `cite` on a finished job before relaying results. It prints every finding with the lines it cites, read from the reviewed revision for committed scopes and from the working tree for working scope, and marks anything it cannot resolve. The host classifies each finding as agree, disagree with evidence, nuance, false positive, or unverifiable, and relays that alongside the findings with their ids, so you can decide with `reject F-...` and friends. It is told to default to trusting a finding it cannot refute from the cited lines, since it may have written the code itself.
+The skill tells the host agent to run `cite` on a finished job before relaying results. It prints every finding with the lines it cites, read from the reviewed revision for committed scopes and from the working tree for working scope, and marks anything it cannot resolve. The host classifies each finding as agree, disagree with evidence, nuance, false positive, or unverifiable, and relays that alongside the findings with their ids, so you can decide with `reject F-...` and friends. It is told to default to trusting a finding it cannot refute from the cited lines, since it may have written the code itself.
 
 ## Reviewer capabilities
 
@@ -120,26 +151,29 @@ Each session has a scratch directory at `<artifact directory>/<task>/scratch/`, 
 
 ```sh
 npm test
+npm run validate
 npm run smoke
 ```
 
 `npm test` runs one suite, parametrized over both backends, against disposable Git repositories with fake `claude` and `codex` executables.
 
-`npm run smoke` is opt-in and spends reviewer usage: it runs a review, a resumed re-review, `cite`, and an audit round with a rubric and a two-item checklist against the real `claude` and `codex` CLIs on a disposable repository at low effort. The audit round is the only check that each CLI accepts the schema a checklist extends. `npm run smoke -- codex` or `npm run smoke -- claude` runs one half.
+`npm run validate` checks the plugin against each host: `claude plugin validate --strict`, `agy plugin validate --strict`, and an install into a throwaway `CODEX_HOME`, since Codex has no validator. It needs all three CLIs, and it can start failing with no change here, because Antigravity's validator gains warnings between releases.
 
-The shared runtime lives in `src/runtime.mjs` with one backend module per reviewer in `src/backends/`. Each plugin's `scripts/` directory holds a five-line entry plus committed copies of the runtime and its backend, because both hosts copy an installed plugin out of the repository. After editing `src/`, run `npm run build` to refresh the copies; the test suite fails while a copy is stale. Any change under `plugins/` also needs a version bump before it ships; see [Update](#update).
+`npm run smoke` is opt-in and spends reviewer usage: it runs a review, a resumed re-review, `cite`, and an audit round with a rubric and a two-item checklist against the real `claude` and `codex` CLIs on a disposable repository at low effort. The audit round is the only check that each CLI accepts the schema a checklist extends. `npm run smoke -- codex` or `npm run smoke -- claude` runs one half. Its Codex half leaves a trust entry for the disposable repository in `~/.codex/config.toml`, which is safe to delete.
+
+The runtime lives in `plugins/cross-review/skills/cross-review/scripts/runtime.mjs` with one backend module per reviewer in `scripts/backends/`, listed in the `cross-review.mjs` entry. All of it stays inside the plugin directory because hosts copy an installed plugin out of the repository. Any change under `plugins/` needs a version bump before it ships; see [Update](#update). Keep `SKILL.md` under 8,000 bytes, which `npm test` enforces: Codex's source cuts an injected skill off there. Where `.git/info/exclude` lists `.claude-*`, as this repository's author's Git template does, `git add` silently skips a new `.claude-plugin/` file, so add one with `git add -f`.
 
 Verify an installed development build without starting a review:
 
 ```sh
-claude -p --plugin-dir /absolute/path/to/cross-review/plugins/codex-review \
-  'Use the codex-review skill to run only the bundled runtime help. Do not run a review. Report the absolute script path it ran.'
+claude -p --plugin-dir /absolute/path/to/cross-review/plugins/cross-review \
+  'Use the cross-review skill to run only the bundled runtime help. Do not run a review. Report the absolute script path it ran.'
 
 codex exec --ephemeral --sandbox read-only --cd /path/to/a/git/repository \
-  'Use $claude-review to run only the bundled runtime help. Do not run a review. Report the absolute installed script path.'
+  'Use $cross-review to run only the bundled runtime help. Do not run a review. Report the absolute installed script path.'
 ```
 
-The first should report a path inside the plugin directory and output beginning with `Codex Review`; the second a path under Codex's plugin cache and output beginning with `Claude Review`.
+The first should report a path inside the plugin directory and the second a path under Codex's plugin cache, both with output beginning with `Cross Review`.
 
 ## License
 

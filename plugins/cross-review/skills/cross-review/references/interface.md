@@ -1,25 +1,47 @@
-# Claude Review Runtime Interface
+# Cross Review Runtime Interface
+
+## Reviewers
+
+The reviewer comes first on the command line and is `codex` or `claude`. Each keeps its own sessions and artifacts,
+under `tmp/codex_reviews` and `tmp/claude_reviews`, so asking one never affects the other's thread.
+
+If the first argument is not a reviewer, the runtime uses the only reviewer other than the agent it runs inside, and
+otherwise fails and asks you to name one. It recognizes that agent from the environment, and if it cannot tell, it
+treats both reviewers as available.
+
+A review by the agent it runs inside is refused, because that agent's own review command already does that job; pass
+`--allow-self` to run one anyway, as a fresh conversation. A reviewer cannot start another review: the runtime marks
+each reviewer's environment with `CROSS_REVIEW_DEPTH` and refuses, with no override. The mark can only be lost on a
+Codex reviewer whose `shell_environment_policy.include_only` leaves it out. A review is also refused when Codex's
+sandbox has cut off the network, since a reviewer needs it to reach its API. None of this affects `status`, `result`,
+`cite`, `cancel`, or `reset`.
+
+The runtime removes the host agent's session variables and tokens from the reviewer's environment. Your own
+configuration, such as `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and API keys, still reaches it.
 
 ## Review scopes
 
 ```text
-claude-review.mjs                              working tree, current repository
-claude-review.mjs working                     staged, unstaged, and untracked work
-claude-review.mjs branch [base]               merge-base-to-HEAD branch change
-claude-review.mjs commit [ref]                one commit, default HEAD
-claude-review.mjs range <from>..<to>          explicit two-dot range
-claude-review.mjs repo                        whole repository
-claude-review.mjs again                       previous scope in the active session
-claude-review.mjs new [scope]                 new session, then review
-claude-review.mjs reset                       forget active session; retain artifacts
+cross-review.mjs <reviewer>                               working tree, current repository
+cross-review.mjs <reviewer> working                       staged, unstaged, and untracked work
+cross-review.mjs <reviewer> branch [base]                 merge-base-to-HEAD branch change
+cross-review.mjs <reviewer> commit [ref]                  one commit, default HEAD
+cross-review.mjs <reviewer> range <from>..<to>            explicit two-dot range
+cross-review.mjs <reviewer> repo                          whole repository
+cross-review.mjs <reviewer> again                         previous scope in the active session
+cross-review.mjs <reviewer> new [scope]                   new session, then review
+cross-review.mjs <reviewer> reset                         forget active session; retain artifacts
 ```
 
-Every review result prints its plugin session ID and its Claude session ID; `claude --resume <claude-session-id>`
-opens the reviewer's conversation interactively. To resume that exact active session with a new scope after the
-branch identity changes, including when an exact-commit review worktree advances to a descendant, pass:
+Every review result prints its plugin session ID, which is what `--resume-session` takes, and the reviewer's own
+conversation ID, which opens that conversation interactively: `codex resume <thread-id>` or
+`claude --resume <session-id>`.
+
+To resume an exact active session with a new scope after the branch identity changes, including when an exact-commit
+review worktree advances to a descendant, pass:
 
 ```text
-claude-review.mjs --resume-session <session-id> range <prior-head>..<current-head> [-- focus]
+cross-review.mjs <reviewer> --resume-session <session-id> range <prior-head>..<current-head> [-- focus]
 ```
 
 The selected session must remain active in the same working-tree root and use a clean checkout with a committed
@@ -29,11 +51,11 @@ the current HEAD, and target a new scope whose committed tip equals that HEAD. N
 own the destination checkout identity. A successful resume follows the current checkout identity. A sibling linked
 worktree has separate session storage. Pass the ID again after each
 detached HEAD change, and leave that working tree untouched until the resumed review finishes. The runtime samples
-its named-or-detached identity, HEAD, and cleanliness before invoking Claude and before applying the result; these
-samples apply only to explicit `--resume-session` reviews, and cannot detect a transient change restored between
-them. Background execution may overlap work in another checkout.
+its named-or-detached identity, HEAD, and cleanliness before invoking the reviewer and before applying the result;
+these samples apply only to explicit `--resume-session` reviews, and cannot detect a transient change restored
+between them. Background execution may overlap work in another checkout.
 
-Once a Claude process starts, any error, timeout, cancellation, worker death, checkout mismatch, malformed result,
+Once a reviewer process starts, any error, timeout, cancellation, worker death, checkout mismatch, malformed result,
 or persistence failure that prevents its result from being applied retires the plugin session at its last accepted
 scope and HEAD. Cancellation ends continuity. `again` then reports why it cannot resume, while an ordinary review
 starts a new isolated session and reports the transition. Review the unapplied delta; optional continuity does not
@@ -43,8 +65,8 @@ range for a focused delta. Use `new` when history, review scope, or intended con
 Put custom focus or follow-up feedback after `--`:
 
 ```text
-claude-review.mjs branch main -- Focus on authorization and tenant isolation
-claude-review.mjs again -- The callback API is intentionally retained for compatibility
+cross-review.mjs codex branch main -- Focus on authorization and tenant isolation
+cross-review.mjs claude again -- The callback API is intentionally retained for compatibility
 ```
 
 The runtime also accepts trailing focus text without `--` when unambiguous.
@@ -52,7 +74,7 @@ The runtime also accepts trailing focus text without `--` when unambiguous.
 To add a file's text to the focus, such as a repository's review checklist, pass `--focus-file <path>`:
 
 ```text
-claude-review.mjs range main..HEAD --focus-file docs/review-focus.md -- Also check the importer
+cross-review.mjs codex range main..HEAD --focus-file docs/review-focus.md -- Also check the importer
 ```
 
 The runtime reads the file on the host when it prepares the review. A relative path resolves against the current
@@ -66,7 +88,7 @@ text, so a focus file cannot record one. Pass `--focus-file` again on each round
 For a line-by-line audit, such as of generated code, pass a rubric file, a checklist file, or both:
 
 ```text
-claude-review.mjs new repo --rubric-file audit/rubric.md --checklist-file audit/checklist.txt
+cross-review.mjs codex new repo --background --rubric-file audit/rubric.md --checklist-file audit/checklist.txt
 ```
 
 `--rubric-file` replaces the built-in rules for what counts as a finding and how severe it is, and with them the
@@ -77,11 +99,13 @@ the rubric restates any it still wants and rates severity as `critical`, `high`,
 skipped. The reviewer returns exactly one verdict per item, with a one-line note: `keep`, `finding`, `confirm`,
 `refute`, or `not_applicable`. Each finding names the checklist items it answers, and the runtime derives each
 verdict's finding ids from those links. A checklist without a rubric keeps the built-in rubric, for example to
-confirm or refute another reviewer's findings listed by id.
+confirm or refute another reviewer's findings listed by id. When a checklist lists another reviewer's findings, prefix
+their ids, for example `codex:F-1a2b3c`, so they are not confused with this session's own ids. A prose review
+checklist is still focus text for `--focus-file`.
 
 A round with either file also reviews generated files in the resolved scope, which an ordinary review skips. The
-artifact directory, `.git`, dependency and vendor trees, and credential files stay off limits, and the reviewer still
-writes only to scratch and never commits or pushes.
+artifact directories, `.git`, dependency and vendor trees, and credential files stay off limits, and the reviewer
+still writes only to scratch and never commits or pushes.
 
 The runtime reads both files on the host when it prepares the review. A relative path resolves against the current
 directory, not `--dir`. A missing or unreadable file, or a checklist with a duplicate id, a line without a
@@ -111,23 +135,30 @@ never change a finding's disposition.
 --checklist-file <path>      require one verdict per item listed in this file; see Audits
 --resume-session <id>        resume this repository's prior active session
 --model <model>              explicitly select and persist a model for this session
---effort <level>             low, medium, high, xhigh, or max; default max
+--effort <level>             codex: minimal, low, medium, high, xhigh, max, or ultra; claude: low, medium, high,
+                             xhigh, or max; default max
 --capability <mode>          full (default), workspace, or read-only; see below
 --include-working            add local changes to branch, commit, or range scope
 --background                 start a persistent, detached background job
 --wait                       run a review in the foreground; with status or result, block until the job ends
 --wait-minutes <number>      longest a status or result --wait call blocks; default 5
---timeout-minutes <number>   hard timeout for the Claude process; default none
---max-budget-usd <amount>    pass an API billing cap to Claude Code
+--timeout-minutes <number>   hard timeout for the reviewer process; default none
+--allow-self                 let the agent the runtime runs inside review too; see Reviewers
+--max-budget-usd <amount>    claude only: pass an API billing cap to Claude Code
 ```
 
 ## Reviewer capabilities
 
-`full` gives the reviewer everything the Claude Code agent can normally do, including your MCP servers, hooks, and
-settings, project settings of the reviewed repository included. `workspace` behaves like `full`, because Claude
-Code has no OS sandbox in headless mode. `read-only` limits built-in tools to Read, Glob, and Grep, denies anything
-without a pre-existing permission rule (your MCP tools follow those rules), and loads only your user settings, so
-the reviewed repository's own `.claude/settings.json` hooks do not run.
+`full` gives the reviewer everything its agent can normally do, including your MCP servers, hooks, and settings; for
+Claude, that includes the project settings of the reviewed repository.
+
+`workspace` differs by reviewer. Codex keeps the `workspace-write` sandbox with network access: the checkout, `/tmp`,
+and the scratch directory are writable, and `.git` is protected so it cannot commit, stash, or move refs. For Claude
+it behaves like `full`, because Claude Code has no OS sandbox in headless mode.
+
+`read-only` uses Codex's read-only sandbox. For Claude it limits built-in tools to Read, Glob, and Grep, denies
+anything without a pre-existing permission rule (your MCP tools follow those rules), and loads only your user
+settings, so the reviewed repository's own `.claude/settings.json` hooks do not run.
 
 Every session has a scratch directory at `<task directory>/scratch/`, ignored by Git and named in the prompt as the
 only place inside the repository the reviewer may create files; it persists across rounds. The prompt tells the
@@ -171,15 +202,15 @@ in which case both stay separate for you to decide.
 ## Job controls
 
 ```text
-claude-review.mjs status [job-id] [--wait] [--dir <path>]
-claude-review.mjs result [job-id] [--wait] [--dir <path>]
-claude-review.mjs cite [job-id] [--dir <path>]
-claude-review.mjs cancel [job-id] [--dir <path>]
+cross-review.mjs <reviewer> status [job-id] [--wait] [--dir <path>]
+cross-review.mjs <reviewer> result [job-id] [--wait] [--dir <path>]
+cross-review.mjs <reviewer> cite [job-id] [--dir <path>]
+cross-review.mjs <reviewer> cancel [job-id] [--dir <path>]
 ```
 
-When no job ID is supplied, operate on the latest applicable job. With `--wait`, `status` and `result` poll the job
-until it reaches a terminal status or `--wait-minutes` elapses, then print it; a still-running job says so, and
-another `--wait` call keeps waiting.
+Job controls look only at the named reviewer's jobs. When no job ID is supplied, operate on the latest applicable job.
+With `--wait`, `status` and `result` poll the job until it reaches a terminal status or `--wait-minutes` elapses, then
+print it; a still-running job says so, and another `--wait` call keeps waiting.
 
 `cite` prints each finding of a completed job with the lines it cites and three lines of context, read from the
 reviewed revision for committed scopes and from the working tree for working, repo, and include-working scopes
@@ -190,6 +221,8 @@ credential-looking values on printed lines are redacted. The host uses it to cla
 them.
 
 ## Important mappings
+
+Put the reviewer first and add `--background` to each review:
 
 - “Review what I have changed” → `working`
 - “Review this branch against main” → `branch main`
@@ -202,8 +235,8 @@ them.
 - “Reject finding F-1a2b3c, it is intentional” → `again -- reject F-1a2b3c: intentional`
 - “Use the checklist in docs/review-focus.md” → add `--focus-file docs/review-focus.md`
 - “Audit the generated app with rubric R and checklist C” → `new repo --rubric-file R --checklist-file C`
-- “Have Claude confirm or refute Codex's findings” → add `--checklist-file C`, where C lists each finding as
-  `codex:F-1a2b3c <claim>`
-- “Start over with Claude” → `new`
+- “Have Claude confirm or refute Codex's findings” → `claude` with `--checklist-file C`, where C lists each finding
+  as `codex:F-1a2b3c <claim>`
+- “Start over” → `new`
 - “Forget that review thread” → `reset`
-- “Run it while we keep working” → `--background`
+- “Is the review done?” → `status`, or `result --wait` to block for the result

@@ -66,7 +66,10 @@ export default {
       "--skip-git-repo-check",
       "-c", `model_reasoning_effort=${JSON.stringify(job.effort)}`,
       "-c", `sandbox_mode=${JSON.stringify(SANDBOX_MODE[capability])}`,
-      "-c", 'approval_policy="never"'
+      "-c", 'approval_policy="never"',
+      // A shell_environment_policy such as inherit = "core" would otherwise hide
+      // the runtime's marker from the reviewer's tools, letting them start a review.
+      "-c", 'shell_environment_policy.set.CROSS_REVIEW_DEPTH="1"'
     ];
     // workspace-write already covers the checkout, which contains the scratch
     // directory, and protects .git; only network access needs enabling.

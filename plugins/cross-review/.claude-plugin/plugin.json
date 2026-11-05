@@ -1,7 +1,7 @@
 {
-  "name": "codex-review",
-  "version": "0.8.0",
-  "description": "Review working changes, branches, commits, ranges, or repositories with Codex from Claude Code, keeping one persistent Codex thread per review session.",
+  "name": "cross-review",
+  "version": "0.9.0",
+  "description": "Ask another coding agent, Codex or Claude, to review an exact Git scope, keeping one persistent reviewer conversation per branch.",
   "author": {
     "name": "Raghu Betina",
     "url": "https://github.com/raghubetina"
@@ -9,6 +9,7 @@
   "repository": "https://github.com/raghubetina/cross-review",
   "keywords": [
     "codex",
+    "claude",
     "code-review",
     "second-opinion"
   ],

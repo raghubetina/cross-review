@@ -5,10 +5,10 @@
   },
   "plugins": [
     {
-      "name": "claude-review",
+      "name": "cross-review",
       "source": {
         "source": "local",
-        "path": "./plugins/claude-review"
+        "path": "./plugins/cross-review"
       },
       "policy": {
         "installation": "AVAILABLE",

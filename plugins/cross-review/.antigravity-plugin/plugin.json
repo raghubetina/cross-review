@@ -1,0 +1,11 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "cross-review",
+  "displayName": "Cross Review",
+  "version": "0.9.0",
+  "description": "Ask another coding agent, Codex or Claude, to review an exact Git scope, keeping one persistent reviewer conversation per branch.",
+  "suggestedPrompts": [
+    "Ask Codex to review my current working changes.",
+    "Ask Claude to review this branch against main."
+  ]
+}

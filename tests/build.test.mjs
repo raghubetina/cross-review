@@ -1,37 +1,61 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
-import { TARGETS, currentRelease, nextRecord, pluginDigest, pluginFiles, releaseProblems, staleCopies } from "../scripts/build.mjs";
+import { ROOT, TARGETS, currentRelease, nextRecord, pluginDigest, pluginFiles, releaseProblems } from "../scripts/build.mjs";
 
-test("each plugin ships an up-to-date copy of the shared runtime", () => {
-  const stale = staleCopies();
-  assert.deepEqual(stale, [], `Run \`npm run build\`; stale copies: ${stale.map((copy) => copy.to).join(", ")}`);
-});
+// Codex keeps only this much of a skill it injects, whatever its docs say, so
+// anything past it would silently never reach the model.
+const CODEX_SKILL_PROMPT_BYTES = 8_000;
+// Codex's and Antigravity's limit; Claude Code allows more.
+const SKILL_DESCRIPTION_CHARACTERS = 1_024;
 
-test("each plugin ships the files recorded for its manifest version", () => {
+test("the plugin ships the files recorded for its manifest version", () => {
   const problems = releaseProblems(currentRelease());
   assert.deepEqual(problems, [], problems.join("\n"));
 });
 
-test("a plugin digest covers every shipped file but not the manifest version", () => {
+test("a plugin digest covers every shipped file but not the manifest versions", () => {
   for (const target of TARGETS) {
     const files = pluginFiles(target);
-    for (const file of [target.manifest, `${target.scripts}/runtime.mjs`, `${target.directory}/skills/${target.plugin}/SKILL.md`]) {
+    for (const file of [...target.manifests, `${target.skill}/scripts/runtime.mjs`, `${target.skill}/SKILL.md`]) {
       assert.ok(files.includes(file), `${file} is not among the digested files of ${target.plugin}`);
     }
   }
 
-  const target = { directory: "plugins/p", manifest: "plugins/p/.claude-plugin/plugin.json" };
+  const target = { directory: "plugins/p", manifests: ["plugins/p/.claude-plugin/plugin.json", "plugins/p/.codex-plugin/plugin.json"] };
   const skill = "plugins/p/skills/p/SKILL.md";
-  const contents = { [target.manifest]: '{"name":"p","version":"1.0.0"}', [skill]: "one\n" };
+  const contents = { [target.manifests[0]]: '{"name":"p","version":"1.0.0"}', [target.manifests[1]]: '{"name":"p","version":"1.0.0"}', [skill]: "one\n" };
   const digest = (overrides) => {
     const files = { ...contents, ...overrides };
     return pluginDigest(target, Object.keys(files), (file) => Buffer.from(files[file]));
   };
-  assert.equal(digest({ [target.manifest]: '{\n  "name": "p",\n  "version": "1.0.1"\n}\n' }), digest({}));
+  assert.equal(digest({ [target.manifests[0]]: '{\n  "name": "p",\n  "version": "1.0.1"\n}\n' }), digest({}));
+  assert.equal(digest({ [target.manifests[1]]: '{\n  "name": "p",\n  "version": "1.0.1"\n}\n' }), digest({}));
   assert.notEqual(digest({ [skill]: "two\n" }), digest({}));
-  assert.notEqual(digest({ [target.manifest]: '{"name":"p","version":"1.0.0","description":"new"}' }), digest({}));
+  assert.notEqual(digest({ [target.manifests[1]]: '{"name":"p","version":"1.0.0","description":"new"}' }), digest({}));
   assert.notEqual(digest({ "plugins/p/skills/p/references/interface.md": "added\n" }), digest({}));
+});
+
+test("every host's manifest describes the same plugin", () => {
+  for (const target of TARGETS) {
+    const manifests = target.manifests.map((file) => JSON.parse(fs.readFileSync(path.join(ROOT, file), "utf8")));
+    for (const manifest of manifests) {
+      assert.equal(manifest.name, target.plugin);
+      for (const key of ["version", "description"]) assert.equal(manifest[key], manifests[0][key], key);
+    }
+  }
+});
+
+test("the skill fits what every host will load", () => {
+  for (const target of TARGETS) {
+    const skill = fs.readFileSync(path.join(ROOT, target.skill, "SKILL.md"));
+    assert.ok(skill.length <= CODEX_SKILL_PROMPT_BYTES, `SKILL.md is ${skill.length} bytes; Codex truncates it at ${CODEX_SKILL_PROMPT_BYTES}.`);
+    const [, description] = skill.toString("utf8").match(/^description: (.+)$/m);
+    assert.ok(description.length <= SKILL_DESCRIPTION_CHARACTERS, `The description is ${description.length} characters.`);
+    assert.ok(!description.includes(": "), "A colon and space ends a plain YAML value.");
+  }
 });
 
 test("a change without a version bump is reported with the fix", () => {

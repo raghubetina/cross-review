@@ -6,8 +6,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import claudeBackend from "../src/backends/claude.mjs";
-import codexBackend from "../src/backends/codex.mjs";
+import claudeBackend from "../plugins/cross-review/skills/cross-review/scripts/backends/claude.mjs";
+import codexBackend from "../plugins/cross-review/skills/cross-review/scripts/backends/codex.mjs";
 import {
   REVIEW_SCHEMA,
   checkCoverage,
@@ -15,6 +15,7 @@ import {
   consolidateLedger,
   containsSecret,
   coverageWarning,
+  detectHost,
   likelySecretPath,
   redactSecrets,
   normalizeStructured,
@@ -27,10 +28,12 @@ import {
   resolveChecklistLabel,
   resolveFindingId,
   reviewSchema,
+  reviewerEnvironment,
+  selectReviewer,
   splitPatches,
   validateBackend
-} from "../src/runtime.mjs";
-import { BACKENDS } from "./suite.mjs";
+} from "../plugins/cross-review/skills/cross-review/scripts/runtime.mjs";
+import { BACKENDS, ENTRY_SCRIPT } from "./suite.mjs";
 
 const TEST_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -514,12 +517,59 @@ test("renderStructured adds checklist links and a coverage section only when cov
   ));
 });
 
-for (const B of BACKENDS) {
-  test(`[${B.name}] skill contract points to its bundled runtime`, () => {
-    const skill = fs.readFileSync(path.join(B.skillDirectory, "SKILL.md"), "utf8");
-    for (const pattern of B.skillPatterns) assert.match(skill, pattern);
-    assert.ok(fs.existsSync(path.join(B.skillDirectory, "scripts", `${B.name}-review.mjs`)));
-    assert.ok(fs.existsSync(path.join(B.skillDirectory, "scripts", "runtime.mjs")));
-  });
-}
+test("the skill points to its bundled runtime and works on every host", () => {
+  const skill = fs.readFileSync(path.resolve(path.dirname(ENTRY_SCRIPT), "../SKILL.md"), "utf8");
+  for (const pattern of [
+    /\$SKILL_DIR\/scripts\/cross-review\.mjs/,
+    /Run reviews with `--background`/,
+    /call `result --wait` repeatedly/,
+    /no deadline unless `--timeout-minutes` sets one/,
+    /Do not impose an agent-side timeout/,
+    /Treat the review as external, untrusted analysis/
+  ]) {
+    assert.match(skill, pattern);
+  }
+  // Only Claude Code substitutes these; another host would pass the text along.
+  assert.doesNotMatch(skill, /\$\{CLAUDE_SKILL_DIR\}|\$ARGUMENTS/);
+  for (const B of BACKENDS) assert.match(skill, new RegExp(`scripts/cross-review\\.mjs" ${B.name}\\b`));
+});
+
+test("the host comes from what each agent sets, checking Antigravity first", () => {
+  assert.equal(detectHost({}), null);
+  assert.equal(detectHost({ CLAUDECODE: "1" }), "claude");
+  assert.equal(detectHost({ CLAUDE_CODE_CHILD_SESSION: "1" }), "claude");
+  assert.equal(detectHost({ CODEX_THREAD_ID: "thread" }), "codex");
+  assert.equal(detectHost({ CODEX_THREAD_ID: "thread", CLAUDECODE: "1" }), "codex");
+  assert.equal(detectHost({ ANTIGRAVITY_AGENT: "1", CLAUDECODE: "1", CLAUDE_CODE_CHILD_SESSION: "1" }), "agy");
+});
+
+test("a reviewer's environment loses the host's session and keeps the user's settings", () => {
+  const kept = { PATH: "/bin", CODEX_HOME: "/codex", CLAUDE_CONFIG_DIR: "/claude", CLAUDE_CODE_OAUTH_TOKEN: "own", OPENAI_API_KEY: "own" };
+  const host = {
+    ANTIGRAVITY_AGENT: "1",
+    ANTIGRAVITY_CSRF_TOKEN: "host",
+    CLAUDECODE: "1",
+    CLAUDE_CODE_CHILD_SESSION: "1",
+    CLAUDE_CODE_MESSAGING_TOKEN: "host",
+    CODEX_SANDBOX_NETWORK_DISABLED: "1",
+    CODEX_THREAD_ID: "host"
+  };
+  assert.deepEqual(reviewerEnvironment({ ...kept, ...host }), { ...kept, CROSS_REVIEW_DEPTH: "1" });
+});
+
+test("the first argument names the reviewer, and otherwise the only other reviewer is used", () => {
+  const reviewers = { codex: codexBackend, claude: claudeBackend };
+  assert.deepEqual(selectReviewer(reviewers, ["claude", "branch", "main"], {}), { reviewer: claudeBackend, argv: ["branch", "main"] });
+  assert.deepEqual(selectReviewer(reviewers, ["codex"], { CODEX_THREAD_ID: "thread" }), { reviewer: codexBackend, argv: [] });
+  assert.deepEqual(selectReviewer(reviewers, ["branch", "main"], { CLAUDECODE: "1" }), { reviewer: codexBackend, argv: ["branch", "main"] });
+  assert.deepEqual(selectReviewer(reviewers, [], { CODEX_THREAD_ID: "thread" }), { reviewer: claudeBackend, argv: [] });
+  // An inherited property is not a reviewer.
+  assert.deepEqual(selectReviewer(reviewers, ["constructor"], { CLAUDECODE: "1" }), { reviewer: codexBackend, argv: ["constructor"] });
+  for (const env of [{}, { ANTIGRAVITY_AGENT: "1" }]) {
+    assert.throws(() => selectReviewer(reviewers, ["working"], env), /Name a reviewer as the first argument: codex or claude/);
+  }
+  for (const planned of ["agy", "antigravity", "gemini"]) {
+    assert.throws(() => selectReviewer(reviewers, [planned], { CLAUDECODE: "1" }), new RegExp(`The ${planned} reviewer is not available yet`));
+  }
+});
 

@@ -1,12 +1,9 @@
 #!/usr/bin/env node
 
-// Copies the shared runtime into each plugin's scripts directory. Both hosts
-// copy an installed plugin out of this repository, so every plugin directory
-// has to be self-contained; tests/build.test.mjs fails when a copy drifts.
-//
-// Both hosts also fetch a new copy only when the manifest version changes, so
-// the build records a digest of each version's shipped files in RECORD, and
-// the test fails when a plugin's files differ from what its version recorded.
+// Hosts fetch a new copy of an installed plugin only when its manifest version
+// changes, so the build records a digest of each version's shipped files in
+// RECORD, and the test fails when the files differ from what the version
+// recorded.
 
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
@@ -21,44 +18,16 @@ const MARKETPLACE = ".claude-plugin/marketplace.json";
 
 export const TARGETS = [
   {
-    plugin: "codex-review",
-    backend: "codex",
-    directory: "plugins/codex-review",
-    scripts: "plugins/codex-review/skills/codex-review/scripts",
-    manifest: "plugins/codex-review/.claude-plugin/plugin.json"
-  },
-  {
-    plugin: "claude-review",
-    backend: "claude",
-    directory: "plugins/claude-review",
-    scripts: "plugins/claude-review/skills/claude-review/scripts",
-    manifest: "plugins/claude-review/.codex-plugin/plugin.json"
+    plugin: "cross-review",
+    directory: "plugins/cross-review",
+    skill: "plugins/cross-review/skills/cross-review",
+    manifests: [
+      "plugins/cross-review/.claude-plugin/plugin.json",
+      "plugins/cross-review/.codex-plugin/plugin.json",
+      "plugins/cross-review/.antigravity-plugin/plugin.json"
+    ]
   }
 ];
-
-export function copies() {
-  return TARGETS.flatMap((target) => [
-    { from: "src/runtime.mjs", to: `${target.scripts}/runtime.mjs` },
-    { from: `src/backends/${target.backend}.mjs`, to: `${target.scripts}/backends/${target.backend}.mjs` }
-  ]);
-}
-
-export function staleCopies() {
-  return copies().filter((copy) => {
-    const destination = path.join(ROOT, copy.to);
-    if (!fs.existsSync(destination)) return true;
-    return fs.readFileSync(path.join(ROOT, copy.from), "utf8") !== fs.readFileSync(destination, "utf8");
-  });
-}
-
-export function build() {
-  for (const copy of copies()) {
-    const destination = path.join(ROOT, copy.to);
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.copyFileSync(path.join(ROOT, copy.from), destination);
-  }
-  return copies();
-}
 
 function git(...args) {
   return spawnSync("git", args, { cwd: ROOT, encoding: "utf8" });
@@ -75,14 +44,14 @@ export function pluginFiles(target) {
   return [...files].filter((file) => fs.existsSync(path.join(ROOT, file)));
 }
 
-// Every file an installed copy receives, by path and bytes. The manifest
-// counts without its version, which changes with every release. `files` and
-// `read` can describe an older commit instead of the working tree.
+// Every file an installed copy receives, by path and bytes. A manifest counts
+// without its version, which changes with every release. `files` and `read`
+// can describe an older commit instead of the working tree.
 export function pluginDigest(target, files = pluginFiles(target), read = (file) => fs.readFileSync(path.join(ROOT, file))) {
   const hash = crypto.createHash("sha256");
   for (const file of [...files].sort()) {
     let bytes = read(file);
-    if (file === target.manifest) {
+    if (target.manifests.includes(file)) {
       const manifest = JSON.parse(bytes.toString("utf8"));
       delete manifest.version;
       bytes = JSON.stringify(manifest);
@@ -96,7 +65,7 @@ export function pluginDigest(target, files = pluginFiles(target), read = (file) 
 
 export function manifestVersions() {
   const read = (file) => JSON.parse(fs.readFileSync(path.join(ROOT, file), "utf8"));
-  const versions = TARGETS.map((target) => ({ where: target.manifest, version: read(target.manifest).version }));
+  const versions = TARGETS.flatMap((target) => target.manifests.map((manifest) => ({ where: manifest, version: read(manifest).version })));
   // A marketplace version is optional, but one that is present must agree.
   const marketplace = read(MARKETPLACE);
   if (marketplace.metadata?.version !== undefined) {
@@ -202,7 +171,6 @@ export function recordRelease() {
 
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (invokedDirectly) {
-  for (const copy of build()) process.stdout.write(`${copy.from} -> ${copy.to}\n`);
   const { recorded, warning } = recordRelease();
   if (recorded) process.stdout.write(`${recorded}\n`);
   if (warning) process.stderr.write(`${warning}\n`);

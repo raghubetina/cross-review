@@ -36,6 +36,8 @@ if (logPath) {
     conversationId,
     model,
     resumed,
+    reviewDepth: process.env.CROSS_REVIEW_DEPTH ?? null,
+    hostVariables: Object.keys(process.env).filter((name) => /^(CLAUDECODE|CODEX_THREAD_ID|CODEX_SANDBOX)/.test(name)),
     promptFromStdin: args.includes("-"),
     schemaKeys: schema ? Object.keys(schema.properties ?? {}) : null
   })}\n`, "utf8");

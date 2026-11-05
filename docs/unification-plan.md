@@ -1,8 +1,8 @@
 # Plan: unify claude-review and codex-review, then improve both
 
-Status: revision 6, 2026-09-17. All six phases are done; the document now
-describes shipped code, and section 10 logs every review round. Nothing here is implemented yet except where marked "(done in
-codex-review)".
+Status: revision 7, 2026-11-05. All six phases are done, and section 10 logs
+every review round. Section 11 records what came next: the two plugins became
+one in 0.9.0, so the layout and plugin names in the earlier sections are history.
 
 ## 1. Goals
 
@@ -403,6 +403,7 @@ Decided by the author on 2026-09-16:
 - Claude's `conversation_id` is a separate UUID from the plugin session id.
 
 - Repository name: `cross-review`; the plugins inside keep their names.
+  Superseded by section 11.
 - All three capability modes stay: `full` (default), `workspace`,
   `read-only`.
 - Severity vocabulary stays `critical/high/medium/low`, with Codex's P0 to
@@ -558,3 +559,94 @@ added four low findings, all applied: validate the backend contract at
 startup, print the resume hint only once the reviewer has started, cover the
 retirement-time conversation id change and `--max-budget-usd` end to end, and
 bring this document back in line with the shipped contract.
+
+## 11. One plugin for any host
+
+Decided 2026-11-05 and shipped in 0.9.0. The goal is that any of Claude Code,
+Codex, and Antigravity CLI (`agy`) can get a review from either of the other
+two. Gemini CLI cannot be the third agent, because since 2026-06-18 it rejects
+consumer accounts with `UNSUPPORTED_CLIENT`.
+
+- One plugin with a backend per reviewer. One plugin per reviewer would need 3
+  directories and 6 manifests for three agents, and one per host and reviewer 6
+  directories. Here a new reviewer is one backend, and a new host one manifest.
+- The plugin stays in `plugins/cross-review/`, not at the repository root. Hosts
+  copy the whole source, so a root plugin would ship the tests and docs to every
+  install, and any README edit would need a version bump.
+- `agy` installs from the `/tree/main/plugins/cross-review` URL, because it never
+  reads a repository's marketplace file. Its bare repository URL relies on an
+  undocumented scan of `plugins/`.
+- The reviewer is the first argument. With nothing left to copy, `src/` is gone.
+- Self-review is refused by default, with `--allow-self` as the override, because
+  each agent has its own review command. A reviewer starting another review is
+  refused outright, through `CROSS_REVIEW_DEPTH`, which the Codex backend also sets
+  through `shell_environment_policy.set` so that `inherit = "core"` cannot hide it.
+  A user's `include_only` filter runs after that and can still remove it; extending
+  the list would overwrite the user's, and the guard only catches mistakes. Host
+  detection only catches mistakes too, so an undetected host is simply allowed.
+- The host's session variables and tokens are removed from a reviewer's
+  environment by an explicit list, since a prefix would also remove settings such
+  as `CODEX_HOME` and `CLAUDE_CONFIG_DIR`.
+- `SKILL.md` stays under 8,000 bytes, because Codex 0.166.0's source
+  (`codex-rs/ext/skills/src/render.rs`, `MAX_SKILL_PROMPT_BYTES`) cuts an injected
+  skill off there, although OpenAI's docs say the full file is read. Nobody has
+  seen this happen at runtime yet. The cut would have removed the guardrails on
+  untrusted output from both earlier skills.
+- An MCP server stays a non-goal. Codex and `agy` default to 60 s and 180 s per
+  tool call and reviews have outlasted 30 minutes, so it would only wrap the same
+  detached worker in three config formats.
+
+Left for later: an explicit `both` that starts one independent job per other
+reviewer, and `status` and `result` that search across reviewers. Job controls
+look only at the named reviewer's jobs for now.
+
+### The `agy` reviewer, not built yet
+
+Owner's decision, 2026-11-05: it uses the owner's Google AI Pro login, behind an
+explicit opt-in setting that names the auth mode, and runs only on demand, with
+no polling or automatic triggers. The texts behind that decision conflict, and
+the README states the conflict for other users:
+
+- The [FAQ](https://antigravity.google/docs/faq): "Wrapping `agy` inside
+  third-party coding agents or applications, or automating account rotation, is
+  not supported under consumer plans." It recommends a Gemini Enterprise or Google
+  AI Studio API key for third-party coding agents.
+- The [terms](https://antigravity.google/terms), item 6: "Using third party
+  software, tools, or services to access the Service (e.g. using OpenClaw with
+  Antigravity OAuth) is a breach of this Agreement. Such actions may be grounds for
+  suspension or termination of your Antigravity and/or Gemini CLI accounts." Item
+  5: "Google employees and contractors may access, view, review and use
+  Interactions", with a settings preference to change how that data is used. Check
+  it before reviewing private code.
+- A [forum reply](https://discuss.ai.google.dev/t/is-invoking-the-official-agy-cli-from-a-local-ai-coding-assistant-allowed-on-an-individual-google-ai-account/185992)
+  from a moderator, 2026-09-30, calls spawning the unmodified binary locally for
+  your own use "a supported use of the CLI". The asker's follow-up on whether that
+  is Google's official reading had no answer as of 2026-11-05. The earliest readable
+  copy of the FAQ sentence is from 2026-10-10, so which came first is unknown.
+
+What a backend has to handle, from runs on `agy` 1.5.1 with tiny prompts:
+
+- A tool needing approval ends the turn with exit 0, `status: SUCCESS`, and an
+  empty response, so a result counts only when `status` is `SUCCESS`,
+  `denied_actions` is empty, and `structured_output` exists. Read nothing else:
+  `response` joins every attempt, invalid ones included.
+- A reviewed repository's hooks and MCP commands execute even under `--sandbox`,
+  with no trust prompt, so read-only runs start from an empty directory outside the
+  repository and grant `read_file(<repo>)`. That needs a backend-supplied spawn cwd
+  and env, which the runtime does not offer yet.
+- Read-only is `--sandbox` with `toolPermission: proceed-in-sandbox`, `deny
+  write_file(*)`, and `read_file` for each global git include. `--mode plan` diverts
+  the task, and `--mode auto` was refused on this account.
+- Reports say the process can hang after printing its result (17 of 25 runs at
+  about 23 KB on 1.4.10), so stop it a grace period after the `result` event, which
+  needs a terminal-event hook in the runtime.
+- Always pass `--model`, because a resume does not inherit it and `agy` also serves
+  Claude and GPT models. The result has no model field; `--log-file` has the label.
+- Effort levels are low, medium, and high; `--effort max` exits 1 despite `--help`.
+- Set `AGY_CLI_DISABLE_AUTO_UPDATE=true`, or `agy` can replace its binary mid-review.
+- Omit `-p` and pipe the prompt: stdin takes megabytes, and argv fails at 2 MB.
+- There is no `--ephemeral`, and every run stays in the user's conversation history.
+
+The first test is a real review turn with prompts of about 25 KB and 256 KB, which
+is `MAX_INLINE_DIFF_BYTES`, since the reported hangs and empty results appear only
+at those sizes.

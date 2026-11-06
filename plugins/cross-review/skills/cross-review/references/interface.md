@@ -2,12 +2,15 @@
 
 ## Reviewers
 
-The reviewer comes first on the command line and is `codex` or `claude`. Each keeps its own sessions and artifacts,
-under `tmp/codex_reviews` and `tmp/claude_reviews`, so asking one never affects the other's thread.
+The reviewer comes first on the command line and is `codex`, `claude`, or `agy`. Each keeps its own sessions and
+artifacts, under `tmp/codex_reviews`, `tmp/claude_reviews`, and `tmp/agy_reviews`, so asking one never affects another's
+thread.
 
 If the first argument is not a reviewer, the runtime uses the only reviewer other than the agent it runs inside, and
 otherwise fails and asks you to name one. It recognizes that agent from the environment, and if it cannot tell, it
-treats both reviewers as available.
+treats every reviewer as available. `agy` is never the default: it runs only when named, and only after the user opts
+in by setting `CROSS_REVIEW_AGY_AUTH=login`, because Google's FAQ and terms conflict on using a consumer login this way.
+Until then the runtime refuses and says so; the choice is the user's, so do not set it for them.
 
 A review by the agent it runs inside is refused, because that agent's own review command already does that job; pass
 `--allow-self` to run one anyway, as a fresh conversation. A reviewer cannot start another review: the runtime marks
@@ -136,8 +139,9 @@ never change a finding's disposition.
 --resume-session <id>        resume this repository's prior active session
 --model <model>              explicitly select and persist a model for this session
 --effort <level>             codex: minimal, low, medium, high, xhigh, max, or ultra; claude: low, medium, high,
-                             xhigh, or max; default max
---capability <mode>          full (default), workspace, or read-only; see below
+                             xhigh, or max; default max. agy: low, medium, or high; default medium, and ignored
+                             when --model names a model, since its model names carry the level
+--capability <mode>          full (default), workspace, or read-only; see below. agy: read-only only
 --include-working            add local changes to branch, commit, or range scope
 --background                 start a persistent, detached background job
 --wait                       run a review in the foreground; with status or result, block until the job ends
@@ -159,6 +163,14 @@ it behaves like `full`, because Claude Code has no OS sandbox in headless mode.
 `read-only` uses Codex's read-only sandbox. For Claude it limits built-in tools to Read, Glob, and Grep, denies
 anything without a pre-existing permission rule (your MCP tools follow those rules), and loads only your user
 settings, so the reviewed repository's own `.claude/settings.json` hooks do not run.
+
+`agy` offers only `read-only`, because a repository's hooks and MCP commands run with no trust prompt wherever `agy`
+starts, even under its sandbox. It starts in an empty directory outside the repository, under `--sandbox`, with write
+tools denied and file reads granted for the repository and the Git configuration that `git` needs. Since `agy` also
+reads `.agents/` from each parent up to the repository root, the runtime refuses to start when the temporary directory
+is inside any Git repository; point `TMPDIR` elsewhere. It can read files and run read-only `git`; a write from a
+command fails. It cannot run the repository's tests. A turn that stops to ask for approval, or that returns no
+structured review, fails rather than counting as an empty review.
 
 Every session has a scratch directory at `<task directory>/scratch/`, ignored by Git and named in the prompt as the
 only place inside the repository the reviewer may create files; it persists across rounds. The prompt tells the

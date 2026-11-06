@@ -1,7 +1,7 @@
 ---
 name: cross-review
-description: Ask a different coding agent, Codex or Claude, to review an exact Git scope, keeping one persistent reviewer conversation per branch that remembers earlier findings and the user's decisions. Use when the user asks Codex or Claude to review code, wants a second opinion from another agent or model, wants a re-review that does not repeat rejected findings, or manages a running cross-review. Replaces the codex-review and claude-review skills. Do not use when the user asks you yourself to review.
-argument-hint: "[codex|claude] [working|branch <base>|commit <ref>|range <a>..<b>|repo|again|new|reset|status|result|cite|cancel] [--background] [--focus-file <path>] [--rubric-file <path>] [--checklist-file <path>] [-- focus]"
+description: Ask a different coding agent, Codex, Claude, or Antigravity, to review an exact Git scope, keeping one persistent reviewer conversation per branch that remembers earlier findings and the user's decisions. Use when the user asks Codex or Claude to review code, wants a second opinion from another agent or model, wants a re-review that does not repeat rejected findings, or manages a running cross-review. Replaces the codex-review and claude-review skills. Do not use when the user asks you yourself to review.
+argument-hint: "[codex|claude|agy] [working|branch <base>|commit <ref>|range <a>..<b>|repo|again|new|reset|status|result|cite|cancel] [--background] [--focus-file <path>] [--rubric-file <path>] [--checklist-file <path>] [-- focus]"
 allowed-tools: Bash(node *)
 ---
 
@@ -17,7 +17,9 @@ Resolve `SKILL_DIR` to the absolute directory containing this `SKILL.md`, then r
 node "$SKILL_DIR/scripts/cross-review.mjs" <reviewer> <arguments>
 ```
 
-`<reviewer>` comes first and is `codex` or `claude`: use the one the user names. If they name none, omit it; the runtime uses the only other reviewer, and otherwise fails so that you can ask the user. The runtime refuses a review by your own agent unless the user asks for one and you pass `--allow-self`.
+`<reviewer>` comes first and is `codex`, `claude`, or `agy`: use the one the user names. If they name none, omit it; the runtime uses the only other reviewer, leaving out `agy`, and otherwise fails so that you can ask the user. The runtime refuses a review by your own agent unless the user asks for one and you pass `--allow-self`.
+
+Use `agy` only when the user names it. It stays off until the user opts in, so if the runtime says that, relay its message and stop; never set the opt-in yourself.
 
 Translate the user's natural request, or any slash-command arguments, into the runtime interface. Preserve custom focus and follow-up feedback exactly. When the user points to a file of focus text, such as a repository's review checklist, pass it with `--focus-file <path>` instead of pasting it; a relative path resolves against the current directory. Read [references/interface.md](references/interface.md) when scope or command mapping is unclear, and before using `--resume-session`, `--rubric-file`, or `--checklist-file`.
 
@@ -27,6 +29,7 @@ node "$SKILL_DIR/scripts/cross-review.mjs" claude branch main --background -- "F
 node "$SKILL_DIR/scripts/cross-review.mjs" codex range main..HEAD --background --focus-file docs/review-focus.md
 node "$SKILL_DIR/scripts/cross-review.mjs" codex again --background -- "reject F-1a2b3c: it is public API"
 node "$SKILL_DIR/scripts/cross-review.mjs" claude --dir /path/to/repo working --background
+node "$SKILL_DIR/scripts/cross-review.mjs" agy branch main --background
 node "$SKILL_DIR/scripts/cross-review.mjs" codex result --wait
 node "$SKILL_DIR/scripts/cross-review.mjs" codex status
 ```
@@ -63,7 +66,8 @@ node "$SKILL_DIR/scripts/cross-review.mjs" codex status
 
 - Default to `working` scope, `--effort max`, and `--capability full`, which lets the reviewer run tests, write
   scratch code, install tools, and use its MCP servers. Pass `--capability read-only` when the user says the
-  repository is untrusted. Leave the model unset unless the user requests one.
+  repository is untrusted. Leave the model unset unless the user requests one. `agy` is always read-only, defaults to
+  `--effort medium`, and has no `max`.
 - The reviewer may only create files under the session's scratch directory. The runtime compares HEAD and the working
   tree after the review and prints a `Warning:` line if either changed.
 - Run reviews with `--background`, because a max-effort review often outlasts a host's per-call time limit; the

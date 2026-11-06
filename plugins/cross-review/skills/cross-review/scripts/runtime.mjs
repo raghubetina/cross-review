@@ -45,7 +45,7 @@ export const HOST_ENVIRONMENT = [
   "CODEX_THREAD_ID"
 ];
 const REVIEW_DEPTH = "CROSS_REVIEW_DEPTH";
-const PLANNED_REVIEWERS = new Set(["agy", "antigravity", "gemini"]);
+const OTHER_NAMES_FOR_AGY = new Set(["antigravity", "gemini"]);
 
 // Only catches mistakes, so a host it misses goes unguarded. Antigravity comes
 // first because it passes a parent Claude Code's variables through to children.
@@ -69,8 +69,8 @@ export function selectReviewer(reviewers, argv, env = process.env) {
   if (first !== undefined && Object.hasOwn(reviewers, first)) return { reviewer: reviewers[first], argv: rest };
   const names = Object.keys(reviewers);
   // Otherwise this would silently become focus text for another reviewer.
-  if (PLANNED_REVIEWERS.has(first)) throw new Error(`The ${first} reviewer is not available yet. Use ${names.join(" or ")}.`);
-  const others = names.filter((name) => name !== detectHost(env));
+  if (OTHER_NAMES_FOR_AGY.has(first)) throw new Error(`There is no ${first} reviewer. Use ${names.join(" or ")}.`);
+  const others = names.filter((name) => name !== detectHost(env) && !reviewers[name].explicitOnly);
   if (others.length === 1) return { reviewer: reviewers[others[0]], argv };
   throw new Error(`Name a reviewer as the first argument: ${names.join(" or ")}.`);
 }
@@ -81,8 +81,14 @@ function refuseNestedReview(env = process.env) {
   }
 }
 
+function refuseUnavailableReviewer(env = process.env) {
+  const refusal = backend.refusal?.(env);
+  if (refusal) throw new Error(refusal);
+}
+
 function refuseReview(options, env = process.env) {
   refuseNestedReview(env);
+  refuseUnavailableReviewer(env);
   if (detectHost(env) === backend.name && !options.allowSelf) {
     throw new Error(
       `${label()} is the agent running this, so this would be a self-review. Use its own review command, name another reviewer, or pass --allow-self for a fresh ${label()} conversation.`
@@ -115,7 +121,7 @@ export function validateBackend(candidate) {
   if (!candidate.effortLevels.includes(candidate.defaultEffort)) {
     throw new Error(`Backend ${candidate.name} default effort ${candidate.defaultEffort} is not one of its effort levels.`);
   }
-  for (const capability of CAPABILITIES) {
+  for (const capability of capabilitiesOf(candidate)) {
     for (const key of ["tools", "repoScope", "truncation"]) {
       const value = candidate.prompt?.[capability]?.[key];
       if (typeof value !== "string" || !value.trim()) {
@@ -142,6 +148,15 @@ function allArtifactDirectories() {
 const STATE_VERSION = 2;
 export const CAPABILITIES = ["full", "workspace", "read-only"];
 const DEFAULT_CAPABILITY = "full";
+
+function capabilitiesOf(activeBackend) {
+  return activeBackend.capabilities ?? CAPABILITIES;
+}
+
+function defaultCapabilityOf(activeBackend) {
+  const capabilities = capabilitiesOf(activeBackend);
+  return capabilities.includes(DEFAULT_CAPABILITY) ? DEFAULT_CAPABILITY : capabilities[0];
+}
 // setTimeout fires at once for a delay beyond 2^31 - 1 milliseconds.
 const MAX_TIMEOUT_MINUTES = Math.floor((2 ** 31 - 1) / 60_000);
 const DEFAULT_WAIT_MINUTES = 5;
@@ -387,9 +402,13 @@ function usage(reviewers) {
   const available = Object.values(reviewers);
   const extra = available.flatMap((reviewer) => Object.values(reviewer.extraOptions ?? {}).map((option) => option.usage));
   const efforts = available.map((reviewer) => `${reviewer.name}: ${reviewer.effortLevels.join("|")} (default: ${reviewer.defaultEffort})`);
+  const restricted = available
+    .filter((reviewer) => reviewer.capabilities)
+    .map((reviewer) => `; ${reviewer.name}: ${reviewer.capabilities.join("|")} only`);
+  const notes = available.flatMap((reviewer) => (reviewer.usageNote ? [` ${reviewer.usageNote}`] : []));
   return `Cross Review
 
-Reviewers: ${Object.keys(reviewers).join(", ")}. Without one, the only reviewer other than the agent running this is used.
+Reviewers: ${Object.keys(reviewers).join(", ")}. Without one, the only reviewer other than the agent running this is used.${notes.join("")}
 
 Usage:
   ${script} [working]
@@ -413,7 +432,7 @@ Options:
   --resume-session <id>        Resume this repository's prior active session
   --model <model>              Explicit reviewer model override
   --effort <level>             ${efforts.join("; ")}
-  --capability <mode>          ${CAPABILITIES.join("|")} (default: ${DEFAULT_CAPABILITY})
+  --capability <mode>          ${CAPABILITIES.join("|")} (default: ${DEFAULT_CAPABILITY}${restricted.join("")})
   --allow-self                 Let the agent running this review too, in a fresh conversation
   --include-working            Include local changes with branch/commit/range
   --background                 Start a background review
@@ -441,7 +460,7 @@ export function parseArguments(argv, activeBackend = backend) {
     resumeSessionId: null,
     model: null,
     effort: activeBackend.defaultEffort,
-    capability: DEFAULT_CAPABILITY,
+    capability: defaultCapabilityOf(activeBackend),
     backendOptions: Object.fromEntries(Object.values(extraOptions).map((option) => [option.key, null])),
     includeWorking: false,
     allowSelf: false,
@@ -536,8 +555,8 @@ export function parseArguments(argv, activeBackend = backend) {
     positional.push(argument);
   }
 
-  if (!CAPABILITIES.includes(options.capability)) {
-    throw new Error(`Unsupported capability "${options.capability}". Use ${CAPABILITIES.join(", ")}.`);
+  if (!capabilitiesOf(activeBackend).includes(options.capability)) {
+    throw new Error(`Unsupported capability "${options.capability}". Use ${capabilitiesOf(activeBackend).join(", ")}.`);
   }
   if (!activeBackend.effortLevels.includes(options.effort)) {
     throw new Error(`Unsupported effort "${options.effort}". Use ${activeBackend.effortLevels.join(", ")}.`);
@@ -1890,6 +1909,7 @@ function stopReviewer(child) {
 }
 
 async function invokeReviewer(root, job, session, onSpawn = () => {}, onConversation = () => {}) {
+  refuseUnavailableReviewer();
   const binary = reviewerBinary();
   const reviewerVersion = checkReviewerVersion(binary);
   const schema = reviewSchema(job);
@@ -1909,10 +1929,12 @@ async function invokeReviewer(root, job, session, onSpawn = () => {}, onConversa
   if (capability !== "read-only") fs.mkdirSync(scratchDirectory(job), { recursive: true });
   const args = backend.buildArgs({ job, session, schema, schemaPath, lastMessagePath, capability });
   const prompt = buildPrompt(job, session);
+  const environment = reviewerEnvironment();
+  const spawnOptions = backend.spawnOptions?.({ job, env: environment }) ?? {};
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, {
-      cwd: job.repo_root,
-      env: reviewerEnvironment(),
+      cwd: spawnOptions.cwd ?? job.repo_root,
+      env: spawnOptions.env ?? environment,
       stdio: ["pipe", "pipe", "pipe"]
     });
     activeReviewerChild = child;
@@ -1924,11 +1946,28 @@ async function invokeReviewer(root, job, session, onSpawn = () => {}, onConversa
     let timer = null;
     let scanned = 0;
     let conversationReported = typeof backend.earlyConversationId !== "function";
-    const reportConversationEarly = () => {
+    let resultSeen = typeof backend.isTerminalEvent !== "function";
+    let graceTimer = null;
+    let stoppedAfterResult = false;
+    const stopAfterResult = () => {
+      stoppedAfterResult = true;
+      stopReviewer(child);
+      // A helper process holding the pipes open would otherwise keep "close" from firing.
+      setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }, 6_000).unref();
+    };
+    const scanNewLines = () => {
       let newline;
-      while (!conversationReported && (newline = stdout.indexOf("\n", scanned)) >= 0) {
+      while ((!conversationReported || !resultSeen) && (newline = stdout.indexOf("\n", scanned)) >= 0) {
         const line = stdout.slice(scanned, newline).trim();
         scanned = newline + 1;
+        if (!resultSeen && backend.isTerminalEvent(line)) {
+          resultSeen = true;
+          graceTimer = setTimeout(stopAfterResult, backend.resultGraceMs);
+        }
+        if (conversationReported) continue;
         const conversationId = backend.earlyConversationId(line);
         if (!conversationId) continue;
         conversationReported = true;
@@ -1941,7 +1980,9 @@ async function invokeReviewer(root, job, session, onSpawn = () => {}, onConversa
     };
     const clearInvocation = () => {
       if (timer) clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
       if (activeReviewerChild === child) activeReviewerChild = null;
+      spawnOptions.cleanup?.();
     };
     const fail = (error) => {
       if (settled) return;
@@ -1957,7 +1998,7 @@ async function invokeReviewer(root, job, session, onSpawn = () => {}, onConversa
     };
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
-      if (!conversationReported) reportConversationEarly();
+      scanNewLines();
       if (!oversized && Buffer.byteLength(stdout) > MAX_OUTPUT_BYTES) {
         oversized = true;
         stopReviewer(child);
@@ -1971,9 +2012,11 @@ async function invokeReviewer(root, job, session, onSpawn = () => {}, onConversa
       fail(error);
     });
     child.on("close", (code, signal) => {
+      // A cancel outranks a result the reviewer already printed.
+      if (job.status === "cancelled") return fail(new Error("Cancelled by user."));
       if (timedOut) return fail(new Error(`${label()} review timed out after ${job.timeout_minutes} minute(s).`));
       if (oversized) return fail(new Error(`${label()} output exceeded the 32 MB safety limit.`));
-      if (code !== 0) {
+      if (code !== 0 && !stoppedAfterResult) {
         const detail = stderr.trim() || stdout.trim();
         return fail(new Error(`${label()} review failed (exit ${code ?? signal})${detail ? `: ${detail.slice(-4000)}` : "."}`));
       }

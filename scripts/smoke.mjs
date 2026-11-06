@@ -3,7 +3,8 @@
 // Opt-in live check against the real claude and codex CLIs: one review, one
 // resumed re-review, cite, and an audit round with a rubric and a checklist,
 // on a disposable repository, at low effort. Run with `npm run smoke`, or
-// `npm run smoke -- codex` for one half; it spends reviewer usage.
+// `npm run smoke -- codex` for one half; it spends reviewer usage. The agy
+// reviewer runs only when named, with `npm run smoke -- agy` and its opt-in set.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -34,8 +35,7 @@ function scratchRepo() {
 }
 
 const only = process.argv[2];
-for (const name of ["codex", "claude"]) {
-  if (only && only !== name) continue;
+for (const name of only ? [only] : ["codex", "claude"]) {
   const repo = scratchRepo();
   process.stdout.write(`\n=== ${name}: first review\n`);
   const first = run(process.execPath, [ENTRY, name, "--allow-self", "--dir", repo, "working", "--wait", "--effort", "low"], repo);

@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import agyBackend from "../plugins/cross-review/skills/cross-review/scripts/backends/agy.mjs";
 import claudeBackend from "../plugins/cross-review/skills/cross-review/scripts/backends/claude.mjs";
 import codexBackend from "../plugins/cross-review/skills/cross-review/scripts/backends/codex.mjs";
 import {
@@ -568,8 +569,16 @@ test("the first argument names the reviewer, and otherwise the only other review
   for (const env of [{}, { ANTIGRAVITY_AGENT: "1" }]) {
     assert.throws(() => selectReviewer(reviewers, ["working"], env), /Name a reviewer as the first argument: codex or claude/);
   }
-  for (const planned of ["agy", "antigravity", "gemini"]) {
-    assert.throws(() => selectReviewer(reviewers, [planned], { CLAUDECODE: "1" }), new RegExp(`The ${planned} reviewer is not available yet`));
+  for (const name of ["antigravity", "gemini"]) {
+    assert.throws(() => selectReviewer(reviewers, [name], { CLAUDECODE: "1" }), new RegExp(`There is no ${name} reviewer`));
   }
+});
+
+test("a reviewer that must be named is never the default", () => {
+  const reviewers = { codex: codexBackend, claude: claudeBackend, agy: agyBackend };
+  assert.deepEqual(selectReviewer(reviewers, ["agy", "working"], { CLAUDECODE: "1" }), { reviewer: agyBackend, argv: ["working"] });
+  assert.deepEqual(selectReviewer(reviewers, ["working"], { CLAUDECODE: "1" }), { reviewer: codexBackend, argv: ["working"] });
+  assert.deepEqual(selectReviewer(reviewers, ["working"], { CODEX_THREAD_ID: "thread" }), { reviewer: claudeBackend, argv: ["working"] });
+  assert.throws(() => selectReviewer(reviewers, ["working"], { ANTIGRAVITY_AGENT: "1" }), /Name a reviewer as the first argument: codex or claude or agy/);
 });
 

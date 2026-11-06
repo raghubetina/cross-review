@@ -1264,7 +1264,8 @@ function defineSuite(B) {
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
 
-    for (let attempt = 0; attempt < 150; attempt += 1) {
+    // A detached worker can take many seconds to start on a busy machine.
+    for (let attempt = 0; attempt < 1500; attempt += 1) {
       if (fs.existsSync(logPath) && calls(logPath).length === 1) break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
@@ -2522,6 +2523,26 @@ function defineSuite(B) {
       assert.equal(jobs(repo)[0].job.backend_options.max_budget_usd, 2.5);
     });
   }
+
+  test(`[${B.name}] a decision-shaped phrase that is not recorded gets a warning, and the reviewer still runs`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const { logPath } = runReview(repo, ["working"]);
+    const [id] = Object.keys(sessions(repo)[0].session.ledger.findings);
+
+    const unread = "accept F-0a0b0c";
+    const shared = runReview(repo, ["again", "--", `reject ${id}: by design. ${unread}: agreed`]);
+    assert.match(shared.result.stdout, new RegExp(`Decisions: ${id} rejected \\(by design\\. ${unread}: agreed\\)`));
+    assert.match(shared.result.stdout, new RegExp(`Warning: Not recorded as a decision: ${unread}\\. A decision starts a sentence or line`));
+    assert.match(shared.result.stdout, /Status: completed/);
+    assert.equal(calls(logPath).length, 2);
+    const artifact = fs.readFileSync(shared.result.stdout.match(/^Artifact: (.+)$/m)[1], "utf8");
+    assert.match(artifact, new RegExp(`## Warning[\\s\\S]*Not recorded as a decision: ${unread}`));
+
+    const separate = runReview(repo, ["again", "--", `reopen ${id}: look again`]);
+    assert.doesNotMatch(separate.result.stdout, /Not recorded as a decision/);
+    assert.match(separate.result.stdout, new RegExp(`Decisions: ${id} open \\(look again\\)`));
+  });
 
   test(`[${B.name}] read-only and workspace capabilities change the invocation and the prompt`, () => {
     const repo = createRepo();

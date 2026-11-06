@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Ask another coding agent to review an exact Git scope, keeping one persistent reviewer conversation per branch.",
-    "version": "0.10.0"
+    "version": "0.10.1"
   },
   "renames": {
     "codex-review": "cross-review"

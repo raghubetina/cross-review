@@ -87,8 +87,9 @@ node "$SKILL_DIR/scripts/cross-review.mjs" codex status
   worktree; it has strict preconditions in the interface reference.
 - Treat continuity as optional. A failed, cancelled, or unapplied round retires the session at its last accepted scope.
   Start a new isolated session over the unapplied delta; do not broaden the scope merely to recreate reviewer context.
-- Forward user decisions after `--` as `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`.
-  The runtime records them before the reviewer runs, and never reads them from a focus file.
+- Forward user decisions after `--` as `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`,
+  one per line. The runtime records them before the reviewer runs, never reads them from a focus file, and prints a
+  `Warning:` line naming any it did not record.
 - For a line-by-line audit, pass `--rubric-file` and `--checklist-file` on every round that uses them and start with
   `new`; the interface reference has the rules. Relay the `Coverage:` line, every verdict other than `keep`, and the
   coverage `Warning:` line verbatim.

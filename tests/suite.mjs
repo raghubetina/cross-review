@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import agyBackend from "../plugins/cross-review/skills/cross-review/scripts/backends/agy.mjs";
 import claudeBackend from "../plugins/cross-review/skills/cross-review/scripts/backends/claude.mjs";
 import codexBackend from "../plugins/cross-review/skills/cross-review/scripts/backends/codex.mjs";
 import {
@@ -126,6 +127,52 @@ const BACKENDS = [
       assert.equal(args[args.indexOf("--effort") + 1], "max");
       assert.ok(!args.includes("--model"));
     }
+  },
+  {
+    name: "agy",
+    label: "Antigravity",
+    module: agyBackend,
+    hostEnv: { ANTIGRAVITY_AGENT: "1" },
+    env: { CROSS_REVIEW_AGY_AUTH: "login" },
+    fake: path.resolve(TEST_ROOT, "fixtures/fake-agy.mjs"),
+    binEnv: "CROSS_REVIEW_AGY_BIN",
+    logEnv: "FAKE_AGY_LOG",
+    delayEnv: "FAKE_AGY_DELAY_MS",
+    ignoreSigtermEnv: "FAKE_AGY_IGNORE_SIGTERM",
+    failEnv: "FAKE_AGY_FAIL",
+    writeFileEnv: "FAKE_AGY_WRITE_FILE",
+    commitEnv: "FAKE_AGY_COMMIT",
+    tagEnv: "FAKE_AGY_TAG",
+    hookEnv: "FAKE_AGY_HOOK",
+    reportIdEnv: "FAKE_AGY_REPORT_ID",
+    fileEnv: "FAKE_AGY_FILE",
+    lineStartEnv: "FAKE_AGY_LINE_START",
+    lineEndEnv: "FAKE_AGY_LINE_END",
+    noFindingsEnv: "FAKE_AGY_NO_FINDINGS",
+    observationEnv: "FAKE_AGY_OBSERVATION",
+    titleEnv: "FAKE_AGY_TITLE",
+    verdictsEnv: "FAKE_AGY_VERDICTS",
+    checklistItemsEnv: "FAKE_AGY_CHECKLIST_ITEMS",
+    conversationIdEnv: "FAKE_AGY_CONVERSATION_ID",
+    artifactDir: "tmp/agy_reviews",
+    artifactSegments: ["tmp", "agy_reviews"],
+    artifactBasename: "agy_reviews",
+    conversationLabel: "Antigravity conversation ID",
+    jobIdPattern: /Antigravity review job: (\S+)/,
+    isResume: (args) => args.includes("--conversation"),
+    assertArgs(args, capability) {
+      assert.equal(capability, "read-only");
+      assert.ok(args.includes("--sandbox"));
+      assert.equal(args[args.indexOf("--output-format") + 1], "stream-json");
+      assert.ok(args.includes("--disable-slash-commands"));
+      assert.equal(args[args.indexOf("--model") + 1], "gemini-4-argon-medium");
+      assert.ok(!args.includes("--print"));
+      assert.ok(!args.includes("-p"));
+      assert.ok(!args.includes("--dangerously-skip-permissions"));
+      const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+      assert.equal(settings.toolPermission, "proceed-in-sandbox");
+      assert.deepEqual(settings.permissions.deny, ["write_file(*)"]);
+    }
   }
 ];
 
@@ -153,6 +200,7 @@ function calls(logPath) {
 function defineSuite(B) {
   const ENTRY = [ENTRY_SCRIPT, B.name];
   const FAKE = B.fake;
+  const DEFAULT_CAPABILITY = parseArguments([], B.module).options.capability;
 
   function createRepo() {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-review-test-`));
@@ -170,6 +218,7 @@ function defineSuite(B) {
       ...process.env,
       [B.binEnv]: FAKE,
       [B.logEnv]: logPath,
+      ...B.env,
       ...extra
     };
   }
@@ -207,10 +256,10 @@ function defineSuite(B) {
       }));
   }
 
-  test(`[${B.name}] parseArguments defaults to working at max effort`, () => {
+  test(`[${B.name}] parseArguments defaults to working at the reviewer's default effort`, () => {
     const parsed = parseArguments([], B.module);
     assert.equal(parsed.action, "working");
-    assert.equal(parsed.options.effort, "max");
+    assert.equal(parsed.options.effort, B.module.defaultEffort);
     assert.equal(parsed.options.model, null);
   });
 
@@ -293,7 +342,7 @@ function defineSuite(B) {
     assert.throws(() => resolveScope(repo, "branch", "main"), /requires at least one commit/);
   });
 
-  test(`[${B.name}] foreground review creates ignored artifacts and runs with full capability by default`, () => {
+  test(`[${B.name}] foreground review creates ignored artifacts and runs with the reviewer's default capability`, () => {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     fs.writeFileSync(path.join(repo, "new.txt"), "new\n", "utf8");
@@ -302,14 +351,16 @@ function defineSuite(B) {
     assert.match(result.stdout, /Status: completed/);
     assert.match(result.stdout, /Example defect/);
     const invocation = calls(logPath)[0];
-    assert.equal(invocation.cwd, resolveRepository(repo));
     assert.ok(!B.isResume(invocation.args));
-    B.assertArgs(invocation.args, "full");
-    assert.ok(invocation.args.includes("--session-id") || invocation.args[0] === "exec");
-    assert.match(invocation.input, /scratch work under .*scratch \(it persists across review rounds\)/);
-    assert.match(invocation.input, /never commit or push/);
-    assert.ok(fs.existsSync(path.join(sessions(repo)[0].directory, "scratch")));
-    assert.match(result.stdout, /Capability: full/);
+    B.assertArgs(invocation.args, DEFAULT_CAPABILITY);
+    assert.match(result.stdout, new RegExp(`Capability: ${DEFAULT_CAPABILITY}`));
+    if (DEFAULT_CAPABILITY === "full") {
+      assert.equal(invocation.cwd, resolveRepository(repo));
+      assert.ok(invocation.args.includes("--session-id") || invocation.args[0] === "exec");
+      assert.match(invocation.input, /scratch work under .*scratch \(it persists across review rounds\)/);
+      assert.match(invocation.input, /never commit or push/);
+      assert.ok(fs.existsSync(path.join(sessions(repo)[0].directory, "scratch")));
+    }
     assert.deepEqual(invocation.schemaKeys, ["verdict", "summary", "findings", "next_steps", "residual_risk"]);
     assert.match(invocation.input, /## What counts as a finding/);
     assert.match(invocation.input, /4\. It was introduced by the change under review\. A problem that already existed before the change is out of scope/);
@@ -610,7 +661,8 @@ function defineSuite(B) {
     assert.match(input, /verdicts\[\]\.item and findings\[\]\.checklist_items\[\] contain only an id/);
     assert.match(input, /- checklist_items: the ids of the checklist items this finding answers, each exactly as it appears between the backticks, never with its description;/);
     for (const removed of ["Report something only when", "Prefer one strong finding", "generated artifacts"]) assert.ok(!input.includes(removed), removed);
-    for (const kept of [".git", "likely credential files", "never commit or push", "Keep confidence honest"]) assert.ok(input.includes(kept), kept);
+    const conduct = DEFAULT_CAPABILITY === "full" ? "never commit or push" : "Run only read-only Git and diagnostic commands";
+    for (const kept of [".git", "likely credential files", conduct, "Keep confidence honest"]) assert.ok(input.includes(kept), kept);
     assert.deepEqual(calls(logPath).at(-1).schemaKeys, ["verdict", "summary", "findings", "next_steps", "residual_risk", "verdicts"]);
 
     const task = sessions(repo)[0];
@@ -2481,6 +2533,7 @@ function defineSuite(B) {
     assert.doesNotMatch(first.input, /scratch work under/);
     assert.equal(fs.existsSync(path.join(sessions(repo)[0].directory, "scratch")), false);
     assert.match(readOnly.result.stdout, /Capability: read-only/);
+    if (B.module.capabilities) return;
 
     const workspace = runReview(repo, ["again", "--capability", "workspace"]);
     const second = calls(workspace.logPath)[1];
@@ -2663,7 +2716,8 @@ function defineSuite(B) {
     assert.equal(invocation.reviewDepth, "1");
   });
 
-  test(`[${B.name}] without a named reviewer the only other reviewer is used`, () => {
+  // A reviewer that must be named is never the default, so this run would reach a real CLI.
+  if (!B.module.explicitOnly) test(`[${B.name}] without a named reviewer the only other reviewer is used`, () => {
     const repo = changedRepo();
     const other = BACKENDS.find((candidate) => candidate !== B);
     const logPath = fakeLogPath(repo);

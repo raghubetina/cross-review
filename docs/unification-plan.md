@@ -112,6 +112,14 @@ runtime starts:
   prompt: { full: { tools, repoScope, truncation }, workspace: {...}, "read-only": {...} },
   buildArgs({ job, session, schema, schemaPath, lastMessagePath, capability }) -> argv,
   earlyConversationId(line) -> id | null,        // optional
+  // Optional, for a reviewer that needs them. Section 11 has why agy does:
+  capabilities: ["read-only"],                   // what it offers; default all three
+  explicitOnly: true,                            // never the default reviewer
+  usageNote: "...",                              // a sentence for --help
+  refusal(env) -> message | null,                // refuse to start a review
+  spawnOptions({ job, env }) -> { cwd, env, cleanup },
+  isTerminalEvent(line) -> boolean,              // stop resultGraceMs after this event
+  resultGraceMs: 30_000,
   parseOutput({ stdout, lastMessage }) -> { candidate, rawResult, conversationId, usage, models },
   artifactLines({ job, session, parsedOutput, invocation }) -> string[]
 }
@@ -600,11 +608,12 @@ Left for later: an explicit `both` that starts one independent job per other
 reviewer, and `status` and `result` that search across reviewers. Job controls
 look only at the named reviewer's jobs for now.
 
-### The `agy` reviewer, not built yet
+### The `agy` reviewer
 
-Owner's decision, 2026-11-05: it uses the owner's Google AI Pro login, behind an
-explicit opt-in setting that names the auth mode, and runs only on demand, with
-no polling or automatic triggers. The texts behind that decision conflict, and
+Shipped in 0.10.0. Owner's decision, 2026-11-05: it uses the owner's Google AI Pro
+login, behind an explicit opt-in setting that names the auth mode
+(`CROSS_REVIEW_AGY_AUTH=login`), and runs only on demand, with no polling or
+automatic triggers. So it is never the default reviewer. The texts behind that decision conflict, and
 the README states the conflict for other users:
 
 - The [FAQ](https://antigravity.google/docs/faq): "Wrapping `agy` inside
@@ -624,7 +633,7 @@ the README states the conflict for other users:
   is Google's official reading had no answer as of 2026-11-05. The earliest readable
   copy of the FAQ sentence is from 2026-10-10, so which came first is unknown.
 
-What a backend has to handle, from runs on `agy` 1.5.1 with tiny prompts:
+What the backend handles, from runs on `agy` 1.5.1 with tiny prompts:
 
 - A tool needing approval ends the turn with exit 0, `status: SUCCESS`, and an
   empty response, so a result counts only when `status` is `SUCCESS`,
@@ -641,12 +650,33 @@ What a backend has to handle, from runs on `agy` 1.5.1 with tiny prompts:
   about 23 KB on 1.4.10), so stop it a grace period after the `result` event, which
   needs a terminal-event hook in the runtime.
 - Always pass `--model`, because a resume does not inherit it and `agy` also serves
-  Claude and GPT models. The result has no model field; `--log-file` has the label.
+  Claude and GPT models. The result has no model field, but the `init` event does.
 - Effort levels are low, medium, and high; `--effort max` exits 1 despite `--help`.
+  The model names carry the level, as in `gemini-4-argon-medium`, so the backend
+  sends only `--model`.
 - Set `AGY_CLI_DISABLE_AUTO_UPDATE=true`, or `agy` can replace its binary mid-review.
 - Omit `-p` and pipe the prompt: stdin takes megabytes, and argv fails at 2 MB.
 - There is no `--ephemeral`, and every run stays in the user's conversation history.
 
-The first test is a real review turn with prompts of about 25 KB and 256 KB, which
-is `MAX_INLINE_DIFF_BYTES`, since the reported hangs and empty results appear only
-at those sizes.
+Later runs settled the rest:
+
+- Real review turns with prompts of about 25 KB and 256 KB, which is
+  `MAX_INLINE_DIFF_BYTES`, succeeded 6 of 6 times in 16 to 48 s and exited within
+  0.6 s of the result, since the reported hangs and empty results appear only at
+  those sizes. Six runs took Gemini 4 Argon's weekly allowance from 98% to 90%, so
+  the default effort is medium.
+- With that configuration a turn read a file by absolute path, ran `git -C <repo>`,
+  and failed a `touch` in the repository with "Operation not permitted".
+- `--conversation <id>` resumes from a different working directory, with the same
+  conversation ID, so each run can use a fresh temporary directory.
+- `--print-timeout` is unnecessary: a piped prompt with no `-p` runs one turn, and
+  its default of 0 waits for the turn to end.
+- The [discovery docs](https://antigravity.google/docs/customization-discovery) say
+  `agy` reads `.agents/` from each parent of the folder it starts in, up to the
+  repository root, and only that folder when it is in no repository. So a `TMPDIR`
+  inside any repository would undo the isolation, and the backend refuses one.
+
+It is read-only only, since the hooks finding above means a run inside the
+repository could execute that repository's code with no prompt. Offering `full`
+would need another answer to that, and a test of `--dangerously-skip-permissions`,
+which no run here has tried.

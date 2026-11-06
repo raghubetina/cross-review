@@ -4,15 +4,15 @@ A plugin that lets one coding agent ask a different one for a code review of an 
 
 | Host | Reviewers | Invoke |
 | --- | --- | --- |
-| Claude Code | Codex | ask naturally, or `/cross-review codex branch main` |
-| Codex | Claude Code | ask naturally, or `$cross-review claude branch main` |
+| Claude Code | Codex, Antigravity CLI | ask naturally, or `/cross-review codex branch main` |
+| Codex | Claude Code, Antigravity CLI | ask naturally, or `$cross-review claude branch main` |
 | Antigravity CLI (`agy`) | Codex, Claude Code | ask naturally |
 
 Every reviewer shares the same session model: explicit scopes (`working`, `branch [base]`, `commit [ref]`, `range <from>..<to>`, `repo`), `again` to re-review in the same conversation, `--resume-session` for exact resumes across branch identity changes, detached background jobs with `status`, `result`, and `cancel`, secret-filtered Git context on stdin, and a JSON-schema-enforced result. How this came to be one plugin is in [docs/unification-plan.md](docs/unification-plan.md).
 
 ## Install
 
-Requirements: Node.js 18.18 or newer, Git, your host, and the CLI of each reviewer you will use, installed and logged in: Codex CLI 0.136 or newer, Claude Code 2.1.205 or newer. Tested with Codex CLI 0.166.0, Claude Code 2.1.318, and Antigravity CLI 1.5.1.
+Requirements: Node.js 18.18 or newer, Git, your host, and the CLI of each reviewer you will use, installed and logged in: Codex CLI 0.136 or newer, Claude Code 2.1.205 or newer, Antigravity CLI 1.5.1 or newer. Tested with Codex CLI 0.166.0, Claude Code 2.1.318, and Antigravity CLI 1.5.1.
 
 ```sh
 # Claude Code
@@ -37,17 +37,19 @@ Inside a Codex sandbox with no network, the runtime refuses to start a review an
 
 ## Use
 
-The reviewer comes first on the command line. If you name none, the runtime uses the only reviewer other than the agent it runs inside; on `agy`, which has two, it asks you to choose. A review by the agent it runs inside is refused, since that agent's own review command does the job, unless you pass `--allow-self`. A reviewer cannot start another review; the one way around that is a Codex reviewer whose `shell_environment_policy.include_only` leaves out the runtime's `CROSS_REVIEW_DEPTH` marker.
+The reviewer comes first on the command line. If you name none, the runtime uses the only reviewer other than the agent it runs inside, leaving out `agy`, which runs only when named; on `agy`, which has two, it asks you to choose. A review by the agent it runs inside is refused, since that agent's own review command does the job, unless you pass `--allow-self`. A reviewer cannot start another review; the one way around that is a Codex reviewer whose `shell_environment_policy.include_only` leaves out the runtime's `CROSS_REVIEW_DEPTH` marker.
 
-Reviews run as detached background jobs because a max-effort review often outlasts a host's per-call time limit; `result --wait` blocks for up to `--wait-minutes` (default 5) and can be called again. Every result prints a plugin session ID and the reviewer's conversation ID, which `codex resume <thread-id>` or `claude --resume <session-id>` opens interactively. Artifacts live in the reviewed repository's ignored `tmp/codex_reviews/` and `tmp/claude_reviews/` directories, and each reviewer keeps its own sessions and ledger.
+Reviews run as detached background jobs because a max-effort review often outlasts a host's per-call time limit; `result --wait` blocks for up to `--wait-minutes` (default 5) and can be called again. Every result prints a plugin session ID and the reviewer's conversation ID, which `codex resume <thread-id>`, `claude --resume <session-id>`, or `agy --conversation <conversation-id>` opens interactively. Artifacts live in the reviewed repository's ignored `tmp/codex_reviews/` and `tmp/claude_reviews/` directories, and each reviewer keeps its own sessions and ledger.
 
 Details: [SKILL.md](plugins/cross-review/skills/cross-review/SKILL.md) and [interface.md](plugins/cross-review/skills/cross-review/references/interface.md).
 
 ## Antigravity and Google's terms
 
-An `agy` reviewer is planned but not included yet, and it will run only after you opt in, because Google's own texts conflict on this use. The [FAQ](https://antigravity.google/docs/faq) says "Wrapping `agy` inside third-party coding agents or applications, or automating account rotation, is not supported under consumer plans" and recommends a Gemini Enterprise or Google AI Studio API key for third-party coding agents. Item 6 of the [terms](https://antigravity.google/terms) names suspension or termination for using third-party software to access the service. A [forum moderator](https://discuss.ai.google.dev/t/is-invoking-the-official-agy-cli-from-a-local-ai-coding-assistant-allowed-on-an-individual-google-ai-account/185992) has called spawning the unmodified binary locally for your own use "a supported use of the CLI", but a follow-up asking whether that is Google's official reading has no answer.
+The `agy` reviewer runs only after you opt in by setting `CROSS_REVIEW_AGY_AUTH=login` in your environment, because Google's own texts conflict on using a consumer login this way. The [FAQ](https://antigravity.google/docs/faq) says "Wrapping `agy` inside third-party coding agents or applications, or automating account rotation, is not supported under consumer plans" and recommends a Gemini Enterprise or Google AI Studio API key for third-party coding agents. Item 6 of the [terms](https://antigravity.google/terms) names suspension or termination for using third-party software to access the service. A [forum moderator](https://discuss.ai.google.dev/t/is-invoking-the-official-agy-cli-from-a-local-ai-coding-assistant-allowed-on-an-individual-google-ai-account/185992) has called spawning the unmodified binary locally for your own use "a supported use of the CLI", but a follow-up asking whether that is Google's official reading has no answer.
 
 This plugin running inside `agy` and calling Codex or Claude does not wrap `agy`, but item 6 also covers using the service "in connection with products not provided by us", so read the terms yourself. Item 5 says Google staff may review what you submit unless you change a setting, so check that before working on private code.
+
+The reviewer runs only when you name it, never on a schedule, and spends your own allowance: in tests on AI Pro, a review of up to 256 KB at the default medium effort took a little over 1% of Gemini 4 Argon's weekly allowance. It is always read-only, because a repository's hooks and MCP commands run with no trust prompt wherever `agy` starts, even under `--sandbox`. So it starts in an empty directory outside the repository, and refuses to start if `TMPDIR` is inside any Git repository. From there it can read files and run read-only `git` but cannot run your tests. Every review stays in your `agy` conversation history.
 
 ## Moving from codex-review and claude-review
 

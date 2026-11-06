@@ -1,7 +1,7 @@
 {
   "name": "cross-review",
-  "version": "0.9.0",
-  "description": "Ask another coding agent, Codex or Claude, to review an exact Git scope, keeping one persistent reviewer conversation per branch.",
+  "version": "0.10.0",
+  "description": "Ask another coding agent, Codex, Claude, or Antigravity, to review an exact Git scope, keeping one persistent reviewer conversation per branch.",
   "author": {
     "name": "Raghu Betina",
     "url": "https://github.com/raghubetina"

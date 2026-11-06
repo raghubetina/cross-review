@@ -202,7 +202,11 @@ results end with a checklist coverage section; see Audits.
 
 A decision is your verdict on a finding, written at the start of a sentence or line in the `--` focus text as
 `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`; a focus file's text is never read for
-decisions. The runtime records it on the finding before the reviewer starts, so it survives a review that fails or a
+decisions. A reason runs to the next semicolon or line end, so put each decision on its own line or separate them with
+semicolons. A phrase shaped like a decision that the runtime did not record, such as `accept F-...` inside a reason or
+after a comma, gets a `Warning:` line naming it, and the review still runs, so repeat the decision next round if you
+meant one. The runtime does not read more into the text because a wrong decision is worse than a missed one. It records
+it on the finding before the reviewer starts, so it survives a review that fails or a
 session that retires, and shows every prior finding with its observation, disposition, and decision to the reviewer
 in each later round. A rejected finding can only come back as a reopen proposal with new evidence; reviewer output
 never changes a disposition. A decision on an id the session does not know fails before the reviewer runs. When a

@@ -23,6 +23,7 @@ import {
   parseArguments,
   parseChecklist,
   parseDecisions,
+  unreadDecisions,
   parseReviewerOutput,
   readOptionFile,
   renderStructured,
@@ -152,6 +153,43 @@ test("parseDecisions reads verbs, ids, and reasons from focus text", () => {
   assert.deepEqual(parseDecisions("no decisions here, just rejecting nothing"), []);
   assert.deepEqual(parseDecisions("should I accept F-1a2b3c? maybe we reject F-2b3c4d later"), []);
   assert.deepEqual(parseDecisions("  accept F-1a2b3c"), [{ id: "F-1a2b3c", disposition: "accepted", text: "" }]);
+});
+
+test("unreadDecisions names each decision-shaped phrase that parseDecisions skips", () => {
+  const cases = {
+    "reject F-1a2b3c: it is public. accept F-2b3c4d: agreed": ["accept F-2b3c4d"],
+    "reject F-1a2b3c: is it public? accept F-2b3c4d": ["accept F-2b3c4d"],
+    "reject F-1a2b3c, accept F-2b3c4d": ["accept F-2b3c4d"],
+    "reject F-1a2b3c and accept F-2b3c4d, then defer  F-3c4d5e": ["accept F-2b3c4d", "defer F-3c4d5e"],
+    "should I accept F-1a2b3c?": ["accept F-1a2b3c"],
+    "reject F-1a2b3c: a reason; accept F-2b3c4d": [],
+    "reject F-1a2b3c: a reason\naccept F-2b3c4d": [],
+    "reject F-1a2b3c. accept F-2b3c4d": [],
+    "Looks fine. REJECT F-1A2B3C: a reason": [],
+    "see F-1a2b3c, which I am rejecting": [],
+    "": []
+  };
+  for (const [focus, expected] of Object.entries(cases)) assert.deepEqual(unreadDecisions(focus), expected, focus);
+  assert.deepEqual(unreadDecisions(undefined), []);
+});
+
+test("reading decisions takes time in proportion to a large focus", () => {
+  const repeated = {
+    "phrases it skips": "should I accept F-1a2b3c ",
+    "decisions in one reason": "accept F-1a2b3c: a. ",
+    "decisions after commas": "accept F-1a2b3c, ",
+    "lines ending in commas": "accept F-1a2b3c,\n",
+    "clauses": "accept F-1a2b3c; ",
+    "spaces": "accept    \t   "
+  };
+  for (const [name, text] of Object.entries(repeated)) {
+    const focus = text.repeat(Math.ceil(2_000_000 / text.length));
+    const started = performance.now();
+    parseDecisions(focus);
+    unreadDecisions(focus);
+    // Quadratic parsing would take minutes at this size, so this cannot pass by luck.
+    assert.ok(performance.now() - started < 5_000, name);
+  }
 });
 
 test("consolidateLedger folds resembling entries into the earlier id and keeps the old id as an alias", () => {

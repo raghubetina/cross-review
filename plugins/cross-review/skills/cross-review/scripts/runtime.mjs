@@ -187,7 +187,9 @@ export const OBSERVATIONS = ["new", "persisting", "fixed", "reopen_proposed"];
 export const DISPOSITIONS = ["open", "accepted", "rejected", "deferred"];
 export const CHECKLIST_VERDICTS = ["keep", "finding", "confirm", "refute", "not_applicable"];
 const DECISION_VERBS = { reject: "rejected", accept: "accepted", defer: "deferred", reopen: "open" };
-const DECISION_PATTERN = /(?:^|[.;\n])\s*(reject|accept|defer|reopen)\s+(F-[0-9a-f]{6})\b(?:\s*:\s*([^\n;]*))?/gi;
+const DECISION_PATTERN = /(?:^|[.;\n])\s*(reject|accept|defer|reopen)\s+(F-[0-9a-f]{6})\b(?:\s*:\s*([^\n;]*))?/dgi;
+const DECISION_SHAPED = /\b(?:reject|accept|defer|reopen)\s+F-[0-9a-f]{6}\b/gi;
+const MAX_NAMED_UNREAD_DECISIONS = 5;
 const MAX_NOTE_BYTES = 4096;
 
 // Decisions are the user's verdicts on findings, written as "reject F-1a2b3c:
@@ -204,6 +206,25 @@ export function parseDecisions(text) {
     });
   }
   return decisions;
+}
+
+// Reading more of the focus as decisions would risk recording a verdict the user
+// never gave, which hides a finding from later rounds. So a decision-shaped phrase
+// the pattern skips, such as one inside a reason, is reported instead of guessed at.
+export function unreadDecisions(text) {
+  const source = String(text ?? "");
+  const read = new Set([...source.matchAll(DECISION_PATTERN)].map((match) => match.indices[1][0]));
+  return [...source.matchAll(DECISION_SHAPED)]
+    .filter((match) => !read.has(match.index))
+    .map((match) => match[0].replace(/\s+/g, " "));
+}
+
+function decisionWarning(focus) {
+  const unread = unreadDecisions(focus);
+  if (!unread.length) return null;
+  const named = unread.slice(0, MAX_NAMED_UNREAD_DECISIONS).join(", ");
+  const more = unread.length > MAX_NAMED_UNREAD_DECISIONS ? `, and ${unread.length - MAX_NAMED_UNREAD_DECISIONS} more` : "";
+  return `Not recorded as a decision: ${named}${more}. A decision starts a sentence or line, and a reason runs to the next semicolon or line end, so put each one you meant on its own line.`;
 }
 
 function normalizedTitle(title) {
@@ -1360,6 +1381,7 @@ async function prepareJob(parsed, repoRoot, root, { focusFile = null, rubricFile
       effort: parsed.options.effort,
       capability: parsed.options.capability,
       checkout_warning: null,
+      decision_warning: decisionWarning(parsed.focus),
       timeout_minutes: parsed.options.timeoutMinutes,
       backend_options: parsed.options.backendOptions,
       resumed: entry.session.review_count > 0,
@@ -2347,7 +2369,7 @@ function artifactMarkdown(job, session, parsedOutput, invocation, status = "comp
   const reviewBody = parsedOutput?.structured
     ? renderStructured(parsedOutput.structured)
     : parsedOutput?.rawResult || `(${label()} did not return a usable review.)`;
-  const warnings = [job.checkout_warning, job.coverage_warning].filter(Boolean);
+  const warnings = [job.decision_warning, job.checkout_warning, job.coverage_warning].filter(Boolean);
   const warning = warnings.length ? `## Warning\n\n${warnings.join("\n\n")}\n\n` : "";
   const body = error
     ? `${warning}## Error\n\n${error}\n${parsedOutput ? `\n## Review output (not applied)\n\n${reviewBody}` : ""}`
@@ -2743,6 +2765,7 @@ function renderJob(root, job, includeResult = false) {
   if (job.pid) lines.push(`PID: ${job.pid}`);
   if (job.artifact) lines.push(`Artifact: ${job.artifact}`);
   lines.push(...coverageLines(job));
+  if (job.decision_warning) lines.push(`Warning: ${job.decision_warning}`);
   if (job.checkout_warning) lines.push(`Warning: ${job.checkout_warning}`);
   if (job.coverage_warning) lines.push(`Warning: ${job.coverage_warning}`);
   if (job.error) lines.push(`Error: ${job.error}`);

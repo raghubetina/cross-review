@@ -27,5 +27,8 @@
   },
   "0.10.1": {
     "cross-review": "706302e449cc45030a2082b8064a61474b39340326661e0c5ea3de0e28ac525e"
+  },
+  "0.11.0": {
+    "cross-review": "265de2f87c07c6b92f0714d92dc6fc5dc75eab4a12167729ad1ab55805de7608"
   }
 }

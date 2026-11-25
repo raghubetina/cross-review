@@ -37,8 +37,8 @@ cross-review.mjs <reviewer> reset                         forget active session;
 ```
 
 Every review result prints its plugin session ID, which is what `--resume-session` takes, and the reviewer's own
-conversation ID, which opens that conversation interactively: `codex resume <thread-id>` or
-`claude --resume <session-id>`.
+conversation ID, which opens that conversation interactively: `codex resume <thread-id>`,
+`claude --resume <session-id>`, or `agy --conversation <conversation-id>`.
 
 To resume an exact active session with a new scope after the branch identity changes, including when an exact-commit
 review worktree advances to a descendant, pass:
@@ -63,7 +63,10 @@ or persistence failure that prevents its result from being applied retires the p
 scope and HEAD. Cancellation ends continuity. `again` then reports why it cannot resume, while an ordinary review
 starts a new isolated session and reports the transition. Review the unapplied delta; optional continuity does not
 require a broader replay. `again` normally repeats the selected session's previous scope definition; use an explicit
-range for a focused delta. Use `new` when history, review scope, or intended context should not continue.
+range for a focused delta. Use `new` when history, review scope, or intended context should not continue. A request
+that fails before the reviewer starts, such as `new working` on a clean tree, an unresolvable ref, or a decision on an
+unknown id, changes no session. `again` on rewritten history refuses without ending the session, so the next ordinary
+review inherits its ledger.
 
 Put custom focus or follow-up feedback after `--`:
 
@@ -149,6 +152,7 @@ never change a finding's disposition.
 --timeout-minutes <number>   hard timeout for the reviewer process; default none
 --allow-self                 let the agent the runtime runs inside review too; see Reviewers
 --max-budget-usd <amount>    claude only: pass an API billing cap to Claude Code
+--older-than <days>          with prune: remove what was last active this long ago; default 30
 ```
 
 ## Reviewer capabilities
@@ -168,27 +172,45 @@ settings, so the reviewed repository's own `.claude/settings.json` hooks do not 
 starts, even under its sandbox. It starts in an empty directory outside the repository, under `--sandbox`, with write
 tools denied and file reads granted for the repository and the Git configuration that `git` needs. Since `agy` also
 reads `.agents/` from each parent up to the repository root, the runtime refuses to start when the temporary directory
-is inside any Git repository; point `TMPDIR` elsewhere. It can read files and run read-only `git`; a write from a
+is inside any Git repository; point `TMPDIR` elsewhere. A resumed conversation runs its commands in the directory it
+first started in, so each session keeps one directory, `cross-review-agy-<uid>/<session-id>` under `TMPDIR`, emptied
+before and after every round; the runtime refuses a parent that is not a directory only you can open. It can read files and run read-only `git`; a write from a
 command fails. It cannot run the repository's tests. A turn that stops to ask for approval, or that returns no
 structured review, fails rather than counting as an empty review.
 
 Every session has a scratch directory at `<task directory>/scratch/`, ignored by Git and named in the prompt as the
 only place inside the repository the reviewer may create files; it persists across rounds. The prompt tells the
 reviewer to leave the checkout as found and never commit or push. After the review, on success or failure, the
-runtime compares HEAD, refs, the dirty set by content, newly ignored paths, and `.git` config and hooks with what
-it saw before; any difference becomes a `Warning:` line naming the paths in the result and a warning section in
-the artifact. If HEAD moved, the session keeps the pre-review HEAD as its last reviewed commit. Explicit
-`--resume-session` reviews still fail on any change.
+runtime compares HEAD, refs, the dirty set by content, the staged blobs, newly ignored paths, and the Git config and
+hooks, where Git reads them, with what it saw before; any difference becomes a `Warning:` line naming the paths in the result and a warning section in
+the artifact. If HEAD moved, the session keeps the pre-review HEAD as its last reviewed commit. An explicit
+`--resume-session` review fails instead when the branch identity, HEAD, or cleanliness changed, or another active
+session took the destination; other changes, such as a new tag, are warnings.
 
 ## What the reviewer receives
 
-A filtered view of the change: credential-looking file names and untracked files whose content looks like a
-private key or access key are omitted, credential-looking values inside committed patches are replaced with
-`[redacted]`, and the prompt says which, before the change itself. Committed scopes carry the commit log, the
+A filtered view of the change. Files whose own names match the credential rules in the README are omitted, as is an
+untracked file whose content holds a private key or a provider's access key. In a changed file that holds a private
+key, every line of the key is replaced with `[redacted]`, located by position in the blob Git compared on each side;
+the file is omitted only when its patch does not match both sides line for line, as in a combined diff, or when that
+blob cannot be reproduced, as for a working file a clean filter changes or a side over 64 MB. The filter governs what
+the runtime sends; the reviewer can still open any file in the repository. Elsewhere such values, JSON web tokens, and passwords in URLs are replaced with `[redacted]`. An untracked symbolic link is named but never followed. The prompt says what was omitted and
+redacted, before the change itself. Committed scopes carry the commit log, the
 diff stat, and the SHAs. Up to 256 KB and 40 files are inlined (untracked files up to 512 KB each, 2 MB total); a
-larger change is summarized and the patch handed over as `git diff` commands per file when the reviewer can run
-git, or as per-file patch files under `<task directory>/context/<job-id>/` when it cannot (Claude in read-only
-mode).
+larger change is summarized and the patch handed over as per-file patch files and the whole diff under
+`<task directory>/context/<job-id>/`, taken from the tree the runtime checked, for every reviewer and scope. The
+reviewer is never told to fetch a patch with `git`, since Git asked for one path can pair or select files
+differently from the diff the runtime checked. A rename travels as a pair, and one into or out of a credential file
+name leaves out both sides.
+
+The patch is the one Git shows for the scope: a commit against its first parent, so a clean merge carries what it
+brought in, renames as renames, and file names passed to Git literally. `branch` without a base uses `origin/HEAD`'s
+branch, or the remote branch when there is no local one. A working review fails before the reviewer starts if the
+tree changes between preparing the review and collecting its context.
+
+`status`, `result`, and the artifact print a `Context:` line with the files, bytes of patch, and route the reviewer
+received, `Omitted for safety:` and `Redacted:` lines naming the files the filter acted on, and a `Warning:` line when
+Git lists changed files that reached the reviewer with no patch.
 
 ## Result format
 
@@ -200,11 +222,13 @@ results end with a checklist coverage section; see Audits.
 
 ## Decisions
 
-A decision is your verdict on a finding, written at the start of a sentence or line in the `--` focus text as
-`reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or `reopen F-...`; a focus file's text is never read for
-decisions. A reason runs to the next semicolon or line end, so put each decision on its own line or separate them with
+A decision is your verdict on a finding, written at the start of a sentence or line in the `--` focus text, after an
+optional list marker such as `-` or `1.`, as `reject F-1a2b3c: reason`, `accept F-...`, `defer F-...`, or
+`reopen F-...`; a focus file's text is never read for decisions. An id may be in backticks, one verb may take several
+ids joined by commas or `and`, and the reason may follow a colon, a dash, or nothing. A reason runs to the next semicolon or line end, so put each decision on its own line or separate them with
 semicolons. A phrase shaped like a decision that the runtime did not record, such as `accept F-...` inside a reason or
-after a comma, gets a `Warning:` line naming it, and the review still runs, so repeat the decision next round if you
+after a comma, or `F-1a2b3c: reject`, gets a `Warning:` line naming it, as does a known finding mentioned without a
+decision, and the review still runs, so repeat the decision next round if you
 meant one. The runtime does not read more into the text because a wrong decision is worse than a missed one. It records
 it on the finding before the reviewer starts, so it survives a review that fails or a
 session that retires, and shows every prior finding with its observation, disposition, and decision to the reviewer
@@ -222,18 +246,34 @@ cross-review.mjs <reviewer> status [job-id] [--wait] [--dir <path>]
 cross-review.mjs <reviewer> result [job-id] [--wait] [--dir <path>]
 cross-review.mjs <reviewer> cite [job-id] [--dir <path>]
 cross-review.mjs <reviewer> cancel [job-id] [--dir <path>]
+cross-review.mjs <reviewer> prune [--older-than <days>] [--dir <path>]
 ```
+
+`prune` removes the named reviewer's finished jobs and inactive sessions last active more than 30 days ago, or
+`--older-than` days, along with anything an older version of the plugin wrote, which every command otherwise names in
+a notice. It never removes an active session, a running job, state it cannot read or that a newer version wrote, or
+anything reached through a link. Job controls and `prune` create nothing in a repository
+that has never had a review. A mistyped command or reviewer name fails instead of becoming focus text, and `--help`
+anywhere before `--` prints the usage.
 
 Job controls look only at the named reviewer's jobs. When no job ID is supplied, operate on the latest applicable job.
 With `--wait`, `status` and `result` poll the job until it reaches a terminal status or `--wait-minutes` elapses, then
-print it; a still-running job says so, and another `--wait` call keeps waiting.
+print it; a still-running job says so, and another `--wait` call keeps waiting. Every job control first settles a job
+whose worker has died, as the next review would, and stops the reviewer's process group. `cancel` returns once the
+worker has stopped the reviewer, retired the session, and written the cancelled artifact, forcing it after about 20
+seconds, and only once nothing the reviewer started is still running; it signals only a worker it can identify by PID
+and start time. A reset made during a round survives that round failing, and `new` whose first round fails before
+the reviewer starts restores the sessions it replaced. A round's findings appear only once its session has applied it. A result that misses a schema field is shown as
+written with a `Warning:` line and records no findings, and a review run with `--wait` that fails prints the job, its
+artifact, and any warning before the error.
 
 `cite` prints each finding of a completed job with the lines it cites and three lines of context, read from the
 reviewed revision for committed scopes and from the working tree for working, repo, and include-working scopes
 (flagged when the tree or HEAD has changed since the review, and noting when the index or the committed version
-of the file differs). Without a job ID it picks the latest job for the current checkout. A location it cannot
-resolve, or one outside the repository, is marked unverifiable; credential-looking paths are not shown and
-credential-looking values on printed lines are redacted. The host uses it to classify findings before relaying
+of the file differs). Without a job ID it picks the latest job for the current checkout, and fails if that checkout has none. A location it cannot
+resolve, or one outside the repository, is marked unverifiable. No lines are shown for a credential-looking path or a
+link that resolves to one. A private key's lines print as `[redacted]`, and credential-looking values on other printed
+lines are redacted. The host uses it to classify findings before relaying
 them.
 
 ## Important mappings

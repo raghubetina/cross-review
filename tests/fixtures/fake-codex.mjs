@@ -6,12 +6,15 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 
+import { exitEarly, hold, omitField, stageOnly, startHelper, strayConfig, writeOutput } from "./fake-common.mjs";
+
 const args = process.argv.slice(2);
 if (args.includes("--version")) {
   process.stdout.write("codex-cli 0.153.4\n");
   process.exit(0);
 }
 if (process.env.FAKE_CODEX_IGNORE_SIGTERM === "1") process.on("SIGTERM", () => {});
+exitEarly("FAKE_CODEX");
 
 let input = "";
 for await (const chunk of process.stdin) input += chunk.toString();
@@ -47,6 +50,8 @@ if (logPath) {
 process.stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: conversationId })}\n`);
 process.stdout.write(`${JSON.stringify({ type: "turn.started" })}\n`);
 
+startHelper("FAKE_CODEX");
+await hold("FAKE_CODEX");
 const delay = Number(process.env.FAKE_CODEX_DELAY_MS || 0);
 if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
 
@@ -55,6 +60,8 @@ if (process.env.FAKE_CODEX_WRITE_FILE) {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, "stray\n", "utf8");
 }
+stageOnly("FAKE_CODEX", process.cwd());
+strayConfig("FAKE_CODEX", process.cwd());
 if (process.env.FAKE_CODEX_TAG === "1") spawnSync("git", ["tag", "stray-tag"], { cwd: process.cwd() });
 if (process.env.FAKE_CODEX_HOOK === "1") {
   const gitDir = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: process.cwd(), encoding: "utf8" }).stdout.trim();
@@ -104,10 +111,18 @@ if (process.env.FAKE_CODEX_CHECKLIST_ITEMS) {
   for (const finding of structured.findings) finding.checklist_items = process.env.FAKE_CODEX_CHECKLIST_ITEMS.split(",");
 }
 if (process.env.FAKE_CODEX_VERDICTS) structured.verdicts = JSON.parse(process.env.FAKE_CODEX_VERDICTS);
+// The real CLI enforces the schema it is given, so a checklist schema always
+// gets its required fields, empty unless a test supplies them.
+const suppliedSchema = schema;
+if (suppliedSchema?.properties?.findings?.items?.required?.includes("checklist_items")) {
+  for (const finding of structured.findings) finding.checklist_items ??= [];
+}
+if (suppliedSchema?.required?.includes("verdicts")) structured.verdicts ??= [];
+omitField("FAKE_CODEX", structured);
 const text = JSON.stringify(structured);
 const events = [
   { type: "item.completed", item: { id: "item_0", type: "agent_message", text } },
   { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 30, reasoning_output_tokens: 5 } }
 ];
-for (const event of events) process.stdout.write(`${JSON.stringify(event)}\n`);
+await writeOutput("FAKE_CODEX", events.map((event) => `${JSON.stringify(event)}\n`).join(""));
 if (outputPath) fs.writeFileSync(outputPath, `${text}\n`, "utf8");

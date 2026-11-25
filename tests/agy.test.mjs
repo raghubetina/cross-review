@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { parseArguments, resolveRepository, validateBackend } from "../plugins/cross-review/skills/cross-review/scripts/runtime.mjs";
-import { BACKENDS, calls, command, defineSuite, git } from "./suite.mjs";
+import { BACKENDS, calls, command, defineSuite, git, scratchDir } from "./suite.mjs";
 
 const B = BACKENDS.find((backend) => backend.name === "agy");
 const ENTRY = [path.resolve(path.dirname(B.fake), "../../plugins/cross-review/skills/cross-review/scripts/cross-review.mjs"), "agy"];
@@ -18,7 +18,7 @@ test.before(() => fs.chmodSync(B.fake, 0o755));
 defineSuite(B);
 
 function changedRepo() {
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "agy-backend-test-"));
+  const repo = scratchDir("agy-backend-test-");
   command("git", ["init", "-b", "main", repo]);
   git(repo, "config", "user.email", "test@example.com");
   git(repo, "config", "user.name", "Cross Review Test");
@@ -63,7 +63,7 @@ test("[agy] the internal entry refuses without the opt-in too", () => {
 test("[agy] it refuses a temporary directory inside any repository, even through a link", () => {
   const repo = changedRepo();
   const other = changedRepo();
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "agy-backend-outside-"));
+  const outside = scratchDir("agy-backend-outside-");
   fs.mkdirSync(path.join(repo, "local-tmp"));
   fs.mkdirSync(path.join(other, "nested", "tmp"), { recursive: true });
   fs.symlinkSync(path.join(repo, "local-tmp"), path.join(outside, "link"));
@@ -96,15 +96,44 @@ test("[agy] it is read-only, with effort levels that its models have", () => {
   }
 });
 
-test("[agy] it starts in an empty directory outside the repository and leaves nothing behind", () => {
+test("[agy] it refuses to start under a parent directory other users can enter", { skip: process.platform === "win32" && "permission bits do not apply" }, () => {
+  const repo = changedRepo();
+  const tmp = scratchDir("agy-shared-tmp-");
+  fs.mkdirSync(path.join(tmp, `cross-review-agy-${process.getuid()}`), { mode: 0o755 });
+  fs.chmodSync(path.join(tmp, `cross-review-agy-${process.getuid()}`), 0o755);
+  const refused = review(repo, ["working"], { TMPDIR: tmp });
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stdout + refused.stderr, /is not a directory that only you can open, so Antigravity cannot start there safely/);
+  assert.equal(fs.existsSync(logPath(repo)), false);
+});
+
+test("[agy] each session keeps one private, emptied directory outside the repository", () => {
   const repo = changedRepo();
   fs.mkdirSync(path.join(repo, ".agents"));
   assert.equal(review(repo).status, 0);
   const [invocation] = calls(logPath(repo));
   const root = resolveRepository(repo);
   assert.ok(!path.relative(root, invocation.cwd).match(/^[^.]/), `${invocation.cwd} is inside ${root}`);
-  assert.equal(path.dirname(invocation.cwd), fs.realpathSync(os.tmpdir()));
-  assert.equal(fs.existsSync(invocation.cwd), false);
+  const parent = path.dirname(invocation.cwd);
+  assert.equal(path.dirname(parent), fs.realpathSync(os.tmpdir()));
+  assert.equal(fs.statSync(parent).mode & 0o777, 0o700);
+  const reviews = path.join(repo, "tmp", "agy_reviews");
+  const sessionDir = fs.readdirSync(reviews).find((name) => fs.existsSync(path.join(reviews, name, "session.json")));
+  assert.equal(path.basename(invocation.cwd), JSON.parse(fs.readFileSync(path.join(reviews, sessionDir, "session.json"), "utf8")).session_id);
+  assert.deepEqual(invocation.cwdEntries, []);
+  // A resumed conversation runs its commands where it started, so the next
+  // round starts in the same directory, emptied of anything left there.
+  fs.mkdirSync(path.join(invocation.cwd, ".agents"));
+  assert.equal(review(repo, ["again"]).status, 0);
+  const resumed = calls(logPath(repo)).at(-1);
+  assert.ok(resumed.resumed);
+  assert.equal(resumed.cwd, invocation.cwd);
+  assert.deepEqual(resumed.cwdEntries, []);
+  assert.deepEqual(fs.readdirSync(invocation.cwd), []);
+  // A new session gets a directory of its own.
+  fs.writeFileSync(path.join(repo, "example.txt"), "changed again\n", "utf8");
+  assert.equal(review(repo, ["new", "working"]).status, 0);
+  assert.notEqual(calls(logPath(repo)).at(-1).cwd, invocation.cwd);
   assert.equal(invocation.autoUpdateDisabled, "true");
   assert.ok(!invocation.args.includes("--conversation"));
   assert.ok(!invocation.args.includes("--print-timeout"));
@@ -117,7 +146,7 @@ test("[agy] a linked worktree can read its common Git directory", () => {
   const repo = changedRepo();
   git(repo, "add", "-A");
   git(repo, "commit", "-m", "second");
-  const linked = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "agy-backend-linked-")), "worktree");
+  const linked = path.join(scratchDir("agy-backend-linked-"), "worktree");
   git(repo, "worktree", "add", "-b", "feature", linked);
   fs.writeFileSync(path.join(linked, "example.txt"), "linked\n", "utf8");
   assert.equal(review(linked).status, 0);
@@ -128,7 +157,7 @@ test("[agy] a linked worktree can read its common Git directory", () => {
 test("[agy] Git's configuration is read as the reviewed repository sees it", () => {
   const repo = changedRepo();
   const root = resolveRepository(repo);
-  const elsewhere = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-backend-config-")));
+  const elsewhere = fs.realpathSync(scratchDir("agy-backend-config-"));
   const [global, conditional, local] = ["global", "conditional", "local"].map((name) => path.join(elsewhere, name));
   fs.writeFileSync(global, `[includeIf "gitdir:${root}/"]\n\tpath = ${conditional}\n`, "utf8");
   fs.writeFileSync(conditional, "[core]\n\tabbrev = 12\n", "utf8");
@@ -180,7 +209,11 @@ for (const [shape, message] of [
   });
 }
 
-test("[agy] a process that hangs after its result is stopped, and the review still counts", () => {
+// Node 18 does not share a module loaded with --import with the program, so
+// the fixture cannot shorten the grace there; Node 20 and later do.
+const PRELOAD_SHARES_MODULES = Number(process.versions.node.split(".")[0]) >= 20;
+
+test("[agy] a process that hangs after its result is stopped, and the review still counts", { skip: !PRELOAD_SHARES_MODULES && "Node 18 cannot shorten the grace through --import" }, () => {
   const repo = changedRepo();
   const started = Date.now();
   const result = review(repo, ["working"], { FAKE_AGY_HANG: "1" }, ["--import", SHORT_GRACE]);
@@ -199,7 +232,7 @@ test("[agy] a helper holding the pipes open after the result does not hold the r
 
 test("[agy] a cancel stays a cancel when the stop after the result also fires", async () => {
   const repo = changedRepo();
-  const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "agy-backend-marker-")), "result");
+  const marker = path.join(scratchDir("agy-backend-marker-"), "result");
   const child = spawn(process.execPath, ["--import", SHORT_GRACE, ...ENTRY, "--dir", repo, "working"], {
     cwd: repo,
     stdio: "ignore",

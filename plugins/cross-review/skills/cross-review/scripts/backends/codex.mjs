@@ -47,7 +47,6 @@ export default {
   resumeHint: (id) => `codex resume ${id}`,
   extraOptions: {},
   usesLastMessageFile: true,
-  canRunGit: () => true,
   prompt: {
     full: FULL_PROMPT,
     workspace: FULL_PROMPT,

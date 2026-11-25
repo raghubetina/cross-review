@@ -6,12 +6,15 @@ import path from "node:path";
 import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
 
+import { exitEarly, hold, omitField, stageOnly, startHelper, strayConfig, writeOutput } from "./fake-common.mjs";
+
 const args = process.argv.slice(2);
 if (args.includes("--version")) {
   process.stdout.write("1.5.1\n");
   process.exit(0);
 }
 if (process.env.FAKE_AGY_IGNORE_SIGTERM === "1") process.on("SIGTERM", () => {});
+exitEarly("FAKE_AGY");
 
 let input = "";
 for await (const chunk of process.stdin) input += chunk.toString();
@@ -35,6 +38,7 @@ if (logPath) {
     input,
     pid: process.pid,
     cwd: process.cwd(),
+    cwdEntries: fs.readdirSync(process.cwd()),
     conversationId,
     model,
     resumed,
@@ -51,6 +55,8 @@ const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 emit({ event: "init", conversation_id: conversationId, init: { model, cwd: process.cwd(), tools: ["read_file"] } });
 emit({ event: "step_update", step_update: { conversation_id: conversationId, step_index: 0, state: "DONE", step_type: "user_input" } });
 
+startHelper("FAKE_AGY");
+await hold("FAKE_AGY");
 const delay = Number(process.env.FAKE_AGY_DELAY_MS || 0);
 if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
 
@@ -59,6 +65,8 @@ if (process.env.FAKE_AGY_WRITE_FILE) {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, "stray\n", "utf8");
 }
+stageOnly("FAKE_AGY", repoRoot);
+strayConfig("FAKE_AGY", repoRoot);
 if (process.env.FAKE_AGY_TAG === "1") spawnSync("git", ["tag", "stray-tag"], { cwd: repoRoot });
 if (process.env.FAKE_AGY_HOOK === "1") {
   const gitDir = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: repoRoot, encoding: "utf8" }).stdout.trim();
@@ -109,6 +117,14 @@ if (process.env.FAKE_AGY_CHECKLIST_ITEMS) {
   for (const finding of structured.findings) finding.checklist_items = process.env.FAKE_AGY_CHECKLIST_ITEMS.split(",");
 }
 if (process.env.FAKE_AGY_VERDICTS) structured.verdicts = JSON.parse(process.env.FAKE_AGY_VERDICTS);
+// The real CLI enforces the schema it is given, so a checklist schema always
+// gets its required fields, empty unless a test supplies them.
+const suppliedSchema = schema;
+if (suppliedSchema?.properties?.findings?.items?.required?.includes("checklist_items")) {
+  for (const finding of structured.findings) finding.checklist_items ??= [];
+}
+if (suppliedSchema?.required?.includes("verdicts")) structured.verdicts ??= [];
+omitField("FAKE_AGY", structured);
 
 const result = {
   conversation_id: process.env.FAKE_AGY_RESULT_CONVERSATION_ID || conversationId,
@@ -127,7 +143,7 @@ if (process.env.FAKE_AGY_RESULT === "denied") {
 }
 if (process.env.FAKE_AGY_RESULT === "no-structured") delete result.structured_output;
 if (process.env.FAKE_AGY_RESULT === "error") result.status = "ERROR";
-emit({ event: "result", result });
+await writeOutput("FAKE_AGY", `${JSON.stringify({ event: "result", result })}\n`);
 if (process.env.FAKE_AGY_RESULT_MARKER) fs.writeFileSync(process.env.FAKE_AGY_RESULT_MARKER, "printed\n", "utf8");
 
 // Reports say the real process can stay alive after printing its result.

@@ -7,6 +7,30 @@ import os from "node:os";
 import path from "node:path";
 
 const AUTH_SETTING = "CROSS_REVIEW_AGY_AUTH";
+
+// A resumed conversation runs its shell commands in the directory it started
+// in, so each session keeps one directory for its whole life. It is emptied
+// before and after every round, since `agy` would load hooks and MCP servers
+// left in it, and it sits in a parent only this user can enter, since a
+// predictable path in a shared /tmp could otherwise be created by someone else.
+function sessionDirectory(sessionId) {
+  if (!/^[0-9a-f-]+$/i.test(sessionId ?? "")) throw new Error(`Invalid review session ID for Antigravity: ${sessionId}`);
+  const parent = path.join(os.tmpdir(), `cross-review-agy-${process.getuid?.() ?? os.userInfo().username}`);
+  fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(parent);
+  const shared = process.platform !== "win32" && (stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0);
+  if (!stat.isDirectory() || shared) {
+    throw new Error(`${parent} is not a directory that only you can open, so Antigravity cannot start there safely. Remove it and retry.`);
+  }
+  const directory = path.join(parent, sessionId);
+  fs.mkdirSync(directory, { recursive: true });
+  emptyDirectory(directory);
+  return directory;
+}
+
+function emptyDirectory(directory) {
+  for (const entry of fs.readdirSync(directory)) fs.rmSync(path.join(directory, entry), { recursive: true, force: true });
+}
 const DEFAULT_MODEL = "gemini-4-argon";
 const EFFORT_LEVELS = ["low", "medium", "high"];
 
@@ -81,7 +105,6 @@ export default {
   resumeHint: (id) => `agy --conversation ${id}`,
   extraOptions: {},
   usesLastMessageFile: false,
-  canRunGit: () => true,
   // Reports say `agy` can hang after printing its result; it normally exits within a second.
   resultGraceMs: 30_000,
   prompt: {
@@ -105,12 +128,12 @@ export default {
     return null;
   },
 
-  spawnOptions({ env }) {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "cross-review-agy-"));
+  spawnOptions({ job, env }) {
+    const cwd = sessionDirectory(job.session_id);
     return {
       cwd,
       env: { ...env, AGY_CLI_DISABLE_AUTO_UPDATE: "true" },
-      cleanup: () => fs.rmSync(cwd, { recursive: true, force: true })
+      cleanup: () => emptyDirectory(cwd)
     };
   },
 

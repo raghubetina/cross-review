@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -16,23 +17,29 @@ import {
   consolidateLedger,
   containsSecret,
   coverageWarning,
+  decisionWarning,
   detectHost,
   likelySecretPath,
-  redactSecrets,
+  nearMiss,
+  needsRedaction,
   normalizeStructured,
   parseArguments,
   parseChecklist,
   parseDecisions,
-  unreadDecisions,
   parseReviewerOutput,
+  privateKeyLines,
   readOptionFile,
+  redactKeyLines,
+  redactSecrets,
   renderStructured,
+  sideText,
   resolveChecklistLabel,
   resolveFindingId,
   reviewSchema,
   reviewerEnvironment,
   selectReviewer,
   splitPatches,
+  unreadDecisions,
   validateBackend
 } from "../plugins/cross-review/skills/cross-review/scripts/runtime.mjs";
 import { BACKENDS, ENTRY_SCRIPT } from "./suite.mjs";
@@ -94,11 +101,16 @@ test("likelySecretPath and containsSecret cover the documented patterns", () => 
   for (const file of [
     ".env", ".env.local", "config/.netrc", ".npmrc", ".pypirc", ".htpasswd", "credentials", "credentials.json", "secrets.yml",
     "token.txt", "id_rsa", "id_ed25519", ".ssh/id_ecdsa.pub", "cert.pem", "server.key", "bundle.p12", "cert.pfx",
-    "prod.tfvars", "release.jks", "debug.keystore", "vault.kdbx"
+    "prod.tfvars", "release.jks", "debug.keystore", "vault.kdbx", ".envrc", "config/credentials.yml.enc", "config/master.key",
+    "terraform.tfstate", "terraform.tfstate.backup", ".git-credentials", ".pgpass", "id_dsa", "id_ed25519-backup", "github_token", ".token", "deploy.ppk"
   ]) {
     assert.equal(likelySecretPath(file), true, file);
   }
-  for (const file of ["README.md", "src/token_parser.js", "environment.rb", "keys.js", "secretary.txt", "credentials_form.html"]) {
+  for (const file of [
+    "README.md", "src/token_parser.js", "environment.rb", "keys.js", "secretary.txt", "credentials_form.html",
+    "app/models/token.rb", "design/tokens.css", "design/tokens.json", "src/lexer/token.ts", "app/models/secret.rb", "lib/credentials.rb",
+    "certs/server.crt"
+  ]) {
     assert.equal(likelySecretPath(file), false, file);
   }
   assert.equal(containsSecret("-----BEGIN RSA PRIVATE KEY-----\nabc"), true);
@@ -110,10 +122,173 @@ test("likelySecretPath and containsSecret cover the documented patterns", () => 
   assert.equal(containsSecret("github_pat_11ABCDEFG0123456789abcdefgh"), true);
   assert.equal(containsSecret("sk_live_abcdefghij1234"), true);
   assert.equal(containsSecret("xoxb-1234567890-abcdefghij"), true);
+  // Shapes only; none of these is a real credential.
+  for (const value of [
+    `ASIA${"Q".repeat(16)}`, `gho_${"a".repeat(36)}`, `ghs_${"a".repeat(36)}`, `glpat-${"a".repeat(20)}`, `sk-ant-api03-${"a".repeat(40)}`,
+    `sk-proj-${"a".repeat(40)}`, `AIza${"a".repeat(35)}`, `rk_live_${"a".repeat(24)}`, `npm_${"a".repeat(36)}`
+  ]) {
+    assert.equal(containsSecret(value), true, value);
+  }
+  const jwt = `eyJ${"a".repeat(20)}.eyJ${"b".repeat(30)}.${"c".repeat(40)}`;
+  assert.equal(containsSecret(jwt), false);
+  assert.equal(needsRedaction(jwt), true);
+  assert.equal(needsRedaction("DATABASE_URL=postgres://app:hunter2@db.internal/prod"), true);
+  assert.equal(redactSecrets("DATABASE_URL=postgres://app:hunter2@db.internal/prod"), "DATABASE_URL=postgres://app:[redacted]@db.internal/prod");
+  assert.equal(needsRedaction("see https://example.com/a and mailto:me@example.com"), false);
+  assert.equal(
+    redactSecrets("+-----BEGIN RSA PRIVATE KEY-----\n+TUFERS1VUC1C\n+T1JZLU5PVA==\n+-----END RSA PRIVATE KEY-----\n context"),
+    "+[redacted]\n+[redacted]\n+[redacted]\n+[redacted]\n context"
+  );
   assert.equal(
     redactSecrets("key AKIAIOSFODNN7EXAMPLE and AKIAIOSFODNN7EXAMPLE again\n-----BEGIN RSA PRIVATE KEY-----"),
     "key [redacted] and [redacted] again\n[redacted]"
   );
+});
+
+test("privateKeyLines takes a paired key whole, and an unpaired marker's body lines", () => {
+  assert.deepEqual([...privateKeyLines("a\n-----BEGIN RSA PRIVATE KEY-----\nBODY\n-----END RSA PRIVATE KEY-----\nb\n")], [2, 3, 4]);
+  assert.deepEqual([...privateKeyLines("a\n-----BEGIN PRIVATE KEY-----\nBODY\nmore\n")], [2, 3, 4, 5]);
+  assert.deepEqual([...privateKeyLines('k = "-----BEGIN PRIVATE KEY-----\\nX\\n-----END PRIVATE KEY-----"\nafter\n')], [1]);
+  assert.deepEqual([...privateKeyLines("nothing here\n")], []);
+  assert.deepEqual([...privateKeyLines('head = "-----BEGIN " + "PRIVATE KEY-----"\nBODY\n-----END PRIVATE KEY-----\n')], [3, 2]);
+  // A key without an END line stops at the first line that cannot be body.
+  assert.deepEqual([...privateKeyLines('x("-----BEGIN PRIVATE KEY-----\\nabc");\nconst y = 1;\n')], [1]);
+  assert.deepEqual([...privateKeyLines('  "-----BEGIN PRIVATE KEY-----\\n" +\n  "TUFERS1V\\n" +\n  "-----END PRIVATE KEY-----\\n";\nnext(1);\n')], [1, 2, 3]);
+  // A paired key covers its whole span, whatever syntax holds the body.
+  assert.deepEqual([...privateKeyLines("-----BEGIN PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n\nMIIB\nend();\n-----END PRIVATE KEY-----\n")], [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual([...privateKeyLines('KEY = (\n    b"-----BEGIN PRIVATE KEY-----\\n"\n    b"MIIB\\n"\n    b"-----END PRIVATE KEY-----\\n"\n)\n')], [2, 3, 4]);
+  assert.deepEqual([...privateKeyLines('x = b"-----BEGIN PRIVATE KEY-----\\n"\n    b"MIIB\\n"\ny = 1\n')], [1, 2]);
+});
+
+test("redactKeyLines blanks a key by position, even where the hunk shows no BEGIN line", () => {
+  // Made-up body lines, not a key.
+  const body = Array.from({ length: 8 }, (_, index) => `Qk9EWS1MSU5FLU5PVC1BLUtFWS${index}`);
+  const before = ["test(\"signs\", () => {", "const KEY = `-----BEGIN PRIVATE KEY-----", ...body, "-----END PRIVATE KEY-----`;", "const other = 1;", "});", ""].join("\n");
+  const after = before.replace("const other = 1;", "const other = 2;");
+  const ids = { old: "1111111111111111111111111111111111111111", new: "2222222222222222222222222222222222222222" };
+  const read = (texts) => (side, file, id) => (file === "keyed.js" && id === ids[side] ? texts[side] : null);
+  const tail = [
+    "diff --git a/keyed.js b/keyed.js",
+    `index ${ids.old}..${ids.new} 100644`,
+    "--- a/keyed.js",
+    "+++ b/keyed.js",
+    "@@ -9,5 +9,5 @@ test(\"signs\", () => {",
+    ` ${body[6]}`,
+    ` ${body[7]}`,
+    " -----END PRIVATE KEY-----`;",
+    "-const other = 1;",
+    "+const other = 2;",
+    " });",
+    ""
+  ].join("\n");
+  assert.equal(redactKeyLines(tail, read({ old: before, new: after })), [
+    "diff --git a/keyed.js b/keyed.js",
+    `index ${ids.old}..${ids.new} 100644`,
+    "--- a/keyed.js",
+    "+++ b/keyed.js",
+    "@@ -9,5 +9,5 @@ test(\"signs\", () => {",
+    " [redacted]",
+    " [redacted]",
+    " [redacted]",
+    "-const other = 1;",
+    "+const other = 2;",
+    " });",
+    ""
+  ].join("\n"));
+
+  // Git may name a key line as the enclosing function.
+  const named = tail.replace('@@ test("signs", () => {', `@@ ${body[5]}`);
+  assert.match(redactKeyLines(named, read({ old: before, new: after })), /^@@ -9,5 \+9,5 @@ \[redacted\]$/m);
+
+  // A removed key is found on the old side, an added one on the new side.
+  const removal = [
+    "diff --git a/keyed.js b/keyed.js",
+    "deleted file mode 100644",
+    `index ${ids.old}..${"0".repeat(40)}`,
+    "--- a/keyed.js",
+    "+++ /dev/null",
+    "@@ -1,13 +0,0 @@",
+    ...before.split("\n").slice(0, -1).map((line) => `-${line}`),
+    ""
+  ].join("\n");
+  const removed = redactKeyLines(removal, read({ old: before, new: null }));
+  assert.equal(removed.split("\n").filter((line) => line === "-[redacted]").length, 10);
+  assert.match(removed, /^-const other = 1;$/m);
+  assert.doesNotMatch(removed, /Qk9EWS1MSU5F|PRIVATE KEY/);
+
+  // Each line shown must agree with that side's text, carriage returns aside.
+  assert.equal(redactKeyLines(tail, read({ old: before.replace(body[7], "SOMETHING-ELSE"), new: after })), null);
+  const crlf = (text) => text.replaceAll("\n", "\r\n");
+  assert.doesNotMatch(redactKeyLines(tail, read({ old: crlf(before), new: crlf(after) })), /Qk9EWS1MSU5F/);
+
+  // A side that cannot be read, a patch naming no blobs, a combined diff, or a
+  // short hunk is refused.
+  assert.equal(redactKeyLines(tail, read({ old: null, new: after })), null);
+  assert.equal(redactKeyLines(tail.replace(/^index .*\n/m, ""), read({ old: before, new: after })), null);
+  assert.equal(redactKeyLines(`diff --cc keyed.js\nindex 1,2..3\n--- a/keyed.js\n+++ b/keyed.js\n@@@ -1,1 -1,1 +1,1 @@@\n  x\n`, read({ old: before, new: after })), null);
+  assert.equal(redactKeyLines(tail.replace("@@ -9,5 +9,5 @@", "@@ -9,6 +9,6 @@"), read({ old: before, new: after })), null);
+});
+
+test("sideText reads the blob a patch names, and a working file only when it reproduces that blob", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "side-text-"));
+  const git = (args, input) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", input }).trim();
+  git(["init", "-q", "-b", "main"]);
+  git(["config", "user.email", "test@example.com"]);
+  git(["config", "user.name", "Cross Review Test"]);
+  git(["config", "core.autocrlf", "false"]);
+  git(["config", "filter.upper.clean", "tr a-z A-Z"]);
+  fs.writeFileSync(path.join(repo, ".gitattributes"), "crlf.txt text eol=crlf\nfiltered.txt filter=upper\n");
+  fs.writeFileSync(path.join(repo, "plain.txt"), "one\ntwo\n");
+  fs.writeFileSync(path.join(repo, "crlf.txt"), "one\r\ntwo\r\n");
+  fs.writeFileSync(path.join(repo, "filtered.txt"), "one\n");
+  git(["add", "-A"]);
+  git(["commit", "-qm", "files"]);
+  const stored = git(["rev-parse", "HEAD:plain.txt"]);
+  assert.equal(sideText(repo, stored), "one\ntwo\n");
+  assert.equal(sideText(repo, stored, null, 4), null);
+  // Working blobs are not stored, so the file must hash to the id Git named:
+  // CRLF made LF does, a clean filter's output does not.
+  fs.writeFileSync(path.join(repo, "crlf.txt"), "one\r\ntwo\r\nthree\r\n");
+  fs.writeFileSync(path.join(repo, "filtered.txt"), "one\ntwo\n");
+  const crlf = git(["hash-object", "--", "crlf.txt"]);
+  assert.equal(sideText(repo, crlf, "crlf.txt"), "one\ntwo\nthree\n");
+  assert.equal(sideText(repo, crlf), null);
+  assert.equal(sideText(repo, crlf, "crlf.txt", 4), null);
+  assert.equal(sideText(repo, git(["hash-object", "--", "filtered.txt"]), "filtered.txt"), null);
+  // A filter that answers differently later cannot make other bytes pass.
+  assert.equal(sideText(repo, git(["hash-object", "--no-filters", "--stdin"], "other\n"), "plain.txt"), null);
+  assert.equal(sideText(repo, "0".repeat(40), "plain.txt"), null);
+  assert.equal(sideText(repo, "HEAD", "plain.txt"), null);
+  fs.rmSync(repo, { recursive: true, force: true });
+});
+
+test("splitPatches reads names Git quotes or follows with a tab", () => {
+  const diff = [
+    "diff --git a/with space.txt b/with space.txt",
+    "--- a/with space.txt\t",
+    "+++ b/with space.txt\t",
+    "@@ -1 +1 @@",
+    "diff --git \"a/tab\\there.txt\" \"b/tab\\there.txt\"",
+    "--- \"a/tab\\there.txt\"",
+    "+++ \"b/tab\\there.txt\"",
+    "@@ -1 +1 @@",
+    "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ \"b/caf\\303\\251.txt\"",
+    ""
+  ].join("\n");
+  assert.deepEqual(splitPatches(diff).map((chunk) => chunk.file), ["with space.txt", "tab\there.txt", "café.txt"]);
+  // Raw, as with core.quotePath=false, inside a name Git quotes for its double quote.
+  const emoji = 'diff --git "a/😀 \\"x\\".txt" "b/😀 \\"x\\".txt"\n+++ "b/😀 \\"x\\".txt"\n@@ -1 +1 @@\n';
+  assert.deepEqual(splitPatches(emoji).map((chunk) => chunk.file), ['😀 "x".txt']);
+  // A changed line holding U+2028 does not start a patch, however it continues.
+  const separated = "diff --git a/one.txt b/one.txt\n--- a/one.txt\n+++ b/one.txt\n@@ -1 +1 @@\n+x\u2028diff --git a/two.txt b/two.txt\n+y\n";
+  assert.deepEqual(splitPatches(separated).map((chunk) => chunk.file), ["one.txt"]);
+  assert.equal(splitPatches(separated)[0].patch, separated);
+  const conflict = "diff --cc both.txt\nindex 1,2..3\n--- a/both.txt\n+++ b/both.txt\n@@@ -1,1 -1,1 +1,5 @@@\n++<<<<<<< ours\n";
+  assert.deepEqual(splitPatches(conflict).map((chunk) => chunk.file), ["both.txt"]);
+  assert.equal(splitPatches(conflict)[0].patch, conflict);
 });
 
 test("splitPatches keys each patch by its post-image path", () => {
@@ -171,6 +346,46 @@ test("unreadDecisions names each decision-shaped phrase that parseDecisions skip
   };
   for (const [focus, expected] of Object.entries(cases)) assert.deepEqual(unreadDecisions(focus), expected, focus);
   assert.deepEqual(unreadDecisions(undefined), []);
+});
+
+test("decisions read list markers, backticked ids, several ids, and reasons after any separator", () => {
+  const read = (focus) => parseDecisions(focus).map(({ id, disposition, text }) => `${id} ${disposition}${text ? ` (${text})` : ""}`);
+  assert.deepEqual(read("- reject F-1a2b3c: public API\n* accept F-2b3c4d\n2) defer F-3c4d5e"), [
+    "F-1a2b3c rejected (public API)", "F-2b3c4d accepted", "F-3c4d5e deferred"
+  ]);
+  assert.deepEqual(read("Reject `F-1a2b3c`: public API"), ["F-1a2b3c rejected (public API)"]);
+  assert.deepEqual(read("reject F-1a2b3c and F-2b3c4d: both intentional"), ["F-1a2b3c rejected (both intentional)", "F-2b3c4d rejected (both intentional)"]);
+  assert.deepEqual(read("reject F-1a2b3c, F-2b3c4d, and F-3c4d5e: all three"), ["F-1a2b3c rejected (all three)", "F-2b3c4d rejected (all three)", "F-3c4d5e rejected (all three)"]);
+  assert.deepEqual(read("reject F-1a2b3c because it is public API"), ["F-1a2b3c rejected (because it is public API)"]);
+  assert.deepEqual(read("reject F-1a2b3c - it is public API"), ["F-1a2b3c rejected (it is public API)"]);
+  assert.deepEqual(read("reject F-1a2b3c. accept F-2b3c4d"), ["F-1a2b3c rejected", "F-2b3c4d accepted"]);
+  assert.deepEqual(read("reject F-1a2b3c because this changed in v1.2.3"), ["F-1a2b3c rejected (because this changed in v1.2.3)"]);
+  assert.deepEqual(read("reject F-1a2b3c because v1.2 changed it. accept F-2b3c4d"), ["F-1a2b3c rejected (because v1.2 changed it)", "F-2b3c4d accepted"]);
+  assert.deepEqual(read("reject F-1a2b3c because it is fine. Accept F- labels as text"), ["F-1a2b3c rejected (because it is fine. Accept F- labels as text)"]);
+  assert.deepEqual(unreadDecisions("F-1a2b3c: reject, public API"), ["F-1a2b3c: reject"]);
+  assert.deepEqual(unreadDecisions("reject F-1a2b3c: unlike F-2b3c4d - accept it"), []);
+  const ledger = { findings: { "F-1a2b3c": {}, "F-2b3c4d": {} }, aliases: {} };
+  assert.match(decisionWarning("reject F-1a2b3c: no. Also look at F-2b3c4d and F-9e9e9e.", ledger), /^Mentioned without a decision: F-2b3c4d\. To record one/);
+  assert.equal(decisionWarning("reject F-1a2b3c: no", ledger), null);
+});
+
+test("a lone near miss of a command or reviewer is refused, and help wins anywhere before --", () => {
+  assert.equal(nearMiss("stauts", ["status", "result"]), "status");
+  assert.equal(nearMiss("rest", ["reset", "repo"]), "reset");
+  assert.equal(nearMiss("status", ["status"]), null);
+  assert.equal(nearMiss("tenant", ["status", "reset"]), null);
+  assert.throws(() => parseArguments(["stauts"], codexBackend), /Unknown command "stauts"\. Did you mean status\?/);
+  assert.equal(parseArguments(["stauts", "of", "the", "importer"], codexBackend).focus, "stauts of the importer");
+  assert.throws(() => parseArguments(["reslt", "review-mwpha89z-0451c1"], codexBackend), /Unknown command "reslt"\. Did you mean result\?/);
+  assert.throws(() => parseArguments(["ctie", "review-mwpha89z-0451c1"], codexBackend), /Did you mean cite\?/);
+  assert.equal(parseArguments(["--", "stauts"], codexBackend).focus, "stauts");
+  assert.equal(parseArguments(["repo", "--help"], codexBackend).action, "help");
+  assert.equal(parseArguments(["status", "-h"], codexBackend).action, "help");
+  assert.equal(parseArguments(["--", "--help"], codexBackend).focus, "--help");
+  const reviewers = { codex: { name: "codex" }, claude: { name: "claude" } };
+  assert.throws(() => selectReviewer(reviewers, ["codx", "working"], {}), /There is no codx reviewer\. Did you mean codex\?/);
+  assert.throws(() => selectReviewer(reviewers, ["cluade"], {}), /Did you mean claude\?/);
+  assert.equal(selectReviewer(reviewers, ["status"], { CLAUDECODE: "1" }).reviewer.name, "codex");
 });
 
 test("reading decisions takes time in proportion to a large focus", () => {
@@ -251,7 +466,7 @@ test("renderStructured shows ids, flags, trigger, evidence, and next steps", () 
 });
 
 test("codex backend reads the thread ID, usage, and structured last message from JSONL", () => {
-  const structured = { verdict: "approve", summary: "ok", findings: [], residual_risk: "none" };
+  const structured = { verdict: "approve", summary: "ok", findings: [], next_steps: [], residual_risk: "none" };
   const events = [
     { type: "thread.started", thread_id: "thread-1" },
     { type: "turn.started" },
@@ -269,6 +484,18 @@ test("codex backend reads the thread ID, usage, and structured last message from
   assert.equal(degraded.structured, null);
   assert.equal(degraded.rawResult, "plain prose, not JSON");
   assert.equal(degraded.degraded, true);
+  const incomplete = parseReviewerOutput({ stdout: events, lastMessage: JSON.stringify({ verdict: "approve", summary: "ok", findings: [] }) }, codexBackend);
+  assert.equal(incomplete.structured, null);
+  assert.deepEqual(incomplete.schemaErrors, ["result.next_steps is missing", "result.residual_risk is missing"]);
+  const wrongSeverity = { ...structured, findings: [{ id: null, observation: "new", severity: "urgent", title: "t", body: "b", file: null, line_start: null, line_end: null, pre_existing: false, trigger: "", evidence: "", confidence: 2, recommendation: "" }] };
+  assert.deepEqual(
+    parseReviewerOutput({ stdout: events, lastMessage: JSON.stringify(wrongSeverity) }, codexBackend).schemaErrors,
+    ["result.findings[0].severity is not one of critical, high, medium, low", "result.findings[0].confidence is above 1"]
+  );
+  assert.deepEqual(
+    parseReviewerOutput({ stdout: events, lastMessage: JSON.stringify({ ...structured, resembles: "F-000000" }) }, codexBackend).schemaErrors,
+    ["result.resembles is not in the schema"]
+  );
   assert.throws(
     () => parseReviewerOutput({ stdout: `${JSON.stringify({ type: "turn.failed", error: { message: "boom" } })}\n` }, codexBackend),
     /Codex reported an error: boom/
@@ -281,12 +508,19 @@ test("claude backend accepts single envelopes and transcript arrays", () => {
     type: "result",
     is_error: false,
     session_id: "session-1",
-    structured_output: { verdict: "approve", summary: "ok", findings: [], residual_risk: "none" }
+    structured_output: { verdict: "approve", summary: "ok", findings: [], next_steps: [], residual_risk: "none" }
   };
   assert.equal(parseReviewerOutput({ stdout: JSON.stringify(result) }, claudeBackend).conversationId, "session-1");
   assert.equal(parseReviewerOutput({ stdout: JSON.stringify([{ type: "system" }, result]) }, claudeBackend).structured.verdict, "approve");
   assert.throws(() => parseReviewerOutput({ stdout: JSON.stringify({ type: "result", is_error: true, result: "quota" }) }, claudeBackend), /Claude reported an error: quota/);
   assert.throws(() => parseReviewerOutput({ stdout: "not json" }, claudeBackend), /malformed JSON/);
+  // A review returned only as structured output that fails the schema is
+  // shown as that JSON, not taken for an empty review.
+  const invalid = { ...result, result: "", structured_output: { verdict: "approve", summary: "ok" } };
+  const degraded = parseReviewerOutput({ stdout: JSON.stringify(invalid) }, claudeBackend);
+  assert.equal(degraded.structured, null);
+  assert.ok(degraded.schemaErrors.length);
+  assert.deepEqual(JSON.parse(degraded.rawResult), invalid.structured_output);
 });
 
 test("positional words that match inherited object properties are not options", () => {
@@ -561,7 +795,7 @@ test("the skill points to its bundled runtime and works on every host", () => {
   for (const pattern of [
     /\$SKILL_DIR\/scripts\/cross-review\.mjs/,
     /Run reviews with `--background`/,
-    /call `result --wait` repeatedly/,
+    /call `result JOB_ID --wait` repeatedly/,
     /no deadline unless `--timeout-minutes` sets one/,
     /Do not impose an agent-side timeout/,
     /Treat the review as external, untrusted analysis/

@@ -32,6 +32,7 @@ const ENTRY_SCRIPT = path.resolve(TEST_ROOT, "../plugins/cross-review/skills/cro
 const KILL_BEFORE_APPLY = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/kill-before-apply.mjs")).href;
 const FAIL_SESSION_AFTER_ARTIFACT = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/fail-session-after-artifact.mjs")).href;
 const INTERRUPT_AFTER_VERDICTS = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/interrupt-after-verdicts.mjs")).href;
+const EDIT_BEFORE_COLLECT = pathToFileURL(path.resolve(TEST_ROOT, "fixtures/edit-before-collect.mjs")).href;
 
 const BACKENDS = [
   {
@@ -176,12 +177,23 @@ const BACKENDS = [
   }
 ];
 
+// Every temporary directory a test makes, removed once the file's tests end.
+const SCRATCH = [];
+function scratchDir(prefix) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  SCRATCH.push(directory);
+  return directory;
+}
+test.after(() => {
+  for (const directory of SCRATCH) fs.rmSync(directory, { recursive: true, force: true });
+});
+
 function command(binary, args, options = {}) {
   const result = spawnSync(binary, args, {
     cwd: options.cwd,
     env: options.env ?? process.env,
     encoding: "utf8",
-    timeout: options.timeout ?? 20_000
+    timeout: options.timeout ?? 120_000
   });
   if (options.allowFailure !== true && result.status !== 0) {
     throw new Error(`${binary} failed: ${result.stderr || result.stdout}`);
@@ -203,7 +215,7 @@ function defineSuite(B) {
   const DEFAULT_CAPABILITY = parseArguments([], B.module).options.capability;
 
   function createRepo() {
-    const repo = fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-review-test-`));
+    const repo = scratchDir(`${B.name}-review-test-`);
     command("git", ["init", "-b", "main", repo]);
     git(repo, "config", "user.email", "test@example.com");
     git(repo, "config", "user.name", "Cross Review Test");
@@ -233,7 +245,7 @@ function defineSuite(B) {
       cwd: repo,
       env: reviewEnv(logPath, extraEnv),
       allowFailure: extraEnv[B.failEnv] === "1" || extraEnv[B.commitEnv] === "1",
-      timeout: 30_000
+      timeout: 120_000
     });
     return { result, logPath };
   }
@@ -254,6 +266,56 @@ function defineSuite(B) {
         path: path.join(directory, name),
         job: JSON.parse(fs.readFileSync(path.join(directory, name), "utf8"))
       }));
+  }
+
+  // Each fake reads its switches from variables named with this prefix.
+  const PREFIX = B.delayEnv.replace(/_DELAY_MS$/, "");
+
+  // Polls without a fixed budget per attempt, since a detached worker can take
+  // many seconds to start on a busy machine.
+  async function waitFor(predicate, timeoutMs = 90_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (predicate()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return predicate();
+  }
+
+  // A fake given this file waits for it to disappear before it finishes, so a
+  // test can act while the reviewer is known to be running.
+  const HOLD = `${PREFIX}_HOLD_FILE`;
+  function holdFile() {
+    const file = path.join(scratchDir(`${B.name}-hold-`), "hold");
+    fs.writeFileSync(file, "", "utf8");
+    return file;
+  }
+
+  function release(file) {
+    fs.rmSync(file, { force: true });
+  }
+
+  function alive(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error.code === "EPERM";
+    }
+  }
+
+  // Starts a background review whose reviewer runs a helper and then waits,
+  // and returns once both have started.
+  async function startHeldReview(repo, extraEnv = {}) {
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const logPath = fakeLogPath(repo);
+    const helperFile = path.join(scratchDir(`${B.name}-helper-`), "pid");
+    const env = reviewEnv(logPath, { [B.delayEnv]: "60000", [`${PREFIX}_HELPER_PID_FILE`]: helperFile, ...extraEnv });
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], { cwd: repo, env });
+    const id = started.stdout.match(B.jobIdPattern)?.[1];
+    assert.ok(await waitFor(() => fs.existsSync(helperFile) && fs.readFileSync(helperFile, "utf8").length > 0), "the reviewer never started");
+    assert.ok(await waitFor(() => jobs(repo)[0].job.reviewer_pid), "the reviewer's PID was never recorded");
+    return { id, env, logPath, helper: Number(fs.readFileSync(helperFile, "utf8")) };
   }
 
   test(`[${B.name}] parseArguments defaults to working at the reviewer's default effort`, () => {
@@ -334,7 +396,7 @@ function defineSuite(B) {
   });
 
   test(`[${B.name}] working and repo scopes support an unborn branch`, () => {
-    const repo = fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-review-unborn-`));
+    const repo = scratchDir(`${B.name}-review-unborn-`);
     command("git", ["init", "-b", "main", repo]);
     fs.writeFileSync(path.join(repo, "new.txt"), "uncommitted\n", "utf8");
     assert.equal(resolveScope(repo, "working").head, null);
@@ -394,6 +456,61 @@ function defineSuite(B) {
     assert.ok(fs.readdirSync(task.directory).some((name) => /^001-working\.md$/.test(name)));
     assert.equal(git(repo, "check-ignore", `${B.artifactDir}/001-probe`), `${B.artifactDir}/001-probe`);
     assert.doesNotMatch(fs.existsSync(path.join(repo, ".gitignore")) ? fs.readFileSync(path.join(repo, ".gitignore"), "utf8") : "", new RegExp(B.artifactBasename));
+  });
+
+  test(`[${B.name}] a commit scope delivers a merge, a rename, and a non-ASCII name as Git shows them`, () => {
+    const repo = createRepo();
+    git(repo, "checkout", "-b", "feature");
+    fs.writeFileSync(path.join(repo, "café.txt"), "un café\n", "utf8");
+    git(repo, "add", "café.txt");
+    git(repo, "commit", "-m", "add café");
+    git(repo, "mv", "example.txt", "renamed.txt");
+    git(repo, "commit", "-m", "rename only");
+    git(repo, "checkout", "main");
+    fs.writeFileSync(path.join(repo, "other.txt"), "main moves on\n", "utf8");
+    git(repo, "add", "other.txt");
+    git(repo, "commit", "-m", "main moves on");
+    git(repo, "merge", "--no-ff", "-m", "merge feature", "feature");
+    const { result, logPath } = runReview(repo, ["commit", "HEAD"]);
+    assert.equal(result.status, 0, result.stderr);
+    const input = calls(logPath)[0].input;
+    assert.match(input, /\+\+\+ b\/café\.txt\n@@ -0,0 \+1 @@\n\+un café/);
+    assert.match(input, /rename from example\.txt\nrename to renamed\.txt/);
+    assert.doesNotMatch(input, /\+\+\+ b\/renamed\.txt/);
+    assert.match(input, /### Diff stat\n\n[^#]*café\.txt/);
+    assert.match(result.stdout, /^Context: 2 files, [\d.]+ (B|KB) of patch; inlined$/m);
+    assert.doesNotMatch(result.stdout, /received no patch/);
+  });
+
+  test(`[${B.name}] branch without a base uses origin's default branch when there is no local one`, () => {
+    const origin = createRepo();
+    const clone = scratchDir(`${B.name}-review-clone-`);
+    command("git", ["clone", "-q", origin, clone]);
+    git(clone, "config", "user.email", "test@example.com");
+    git(clone, "config", "user.name", "Cross Review Test");
+    git(clone, "checkout", "-b", "feature");
+    git(clone, "branch", "-D", "main");
+    fs.writeFileSync(path.join(clone, "example.txt"), "changed\n", "utf8");
+    git(clone, "commit", "-am", "change");
+    const { result } = runReview(clone, ["branch"]);
+    assert.equal(result.status, 0, result.stderr);
+    const [{ job }] = jobs(clone);
+    assert.equal(job.scope.base, "origin/main");
+  });
+
+  test(`[${B.name}] a working tree edited between preparation and collection fails before the reviewer starts`, async () => {
+    const repo = createRepo();
+    const file = path.join(repo, "example.txt");
+    fs.writeFileSync(file, "changed\n", "utf8");
+    const logPath = fakeLogPath(repo);
+    const env = reviewEnv(logPath, { EDIT_BEFORE_COLLECT: file, NODE_OPTIONS: `--import=${EDIT_BEFORE_COLLECT}` });
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], { cwd: repo, env });
+    const id = started.stdout.match(B.jobIdPattern)?.[1];
+    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "2", "--dir", repo], { cwd: repo, env, timeout: 150_000 });
+    assert.match(finished.stdout, /Status: failed/);
+    assert.match(finished.stdout, /working tree changed between preparing the review and collecting its context/);
+    assert.ok(!fs.existsSync(logPath) || calls(logPath).length === 0);
+    assert.equal(sessions(repo)[0].session.active, true);
   });
 
   test(`[${B.name}] a literal closing tag in repository content cannot end the context block early`, () => {
@@ -517,6 +634,113 @@ function defineSuite(B) {
     assert.match(input, /A finding already recorded as fixed need not be repeated unless it has regressed/);
   });
 
+  test(`[${B.name}] a request that fails validation leaves every session as it was`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    runReview(repo);
+    git(repo, "checkout", "--", "example.txt");
+    const before = sessions(repo);
+    const clean = command(process.execPath, [...ENTRY, "--dir", repo, "new", "working"], { cwd: repo, env: reviewEnv(fakeLogPath(repo)), allowFailure: true });
+    assert.match(clean.stderr, /working tree is clean/);
+    const badRef = command(process.execPath, [...ENTRY, "--dir", repo, "new", "commit", "no-such-ref"], { cwd: repo, env: reviewEnv(fakeLogPath(repo)), allowFailure: true });
+    assert.match(badRef.stderr, /Unable to resolve commit: no-such-ref/);
+    git(repo, "checkout", "-b", "unused");
+    const unknown = command(process.execPath, [...ENTRY, "--dir", repo, "commit", "HEAD", "--", "reject F-abcdef: no"], { cwd: repo, env: reviewEnv(fakeLogPath(repo)), allowFailure: true });
+    assert.match(unknown.stderr, /Unknown finding id F-abcdef/);
+    assert.deepEqual(sessions(repo).map(({ name, session }) => [name, session.active]), before.map(({ name, session }) => [name, session.active]));
+  });
+
+  test(`[${B.name}] again after rewritten history keeps the ledger for the next ordinary review`, () => {
+    const repo = createRepo();
+    git(repo, "checkout", "-b", "feature");
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    git(repo, "commit", "-am", "change");
+    const first = runReview(repo, ["branch", "main"]);
+    const id = first.result.stdout.match(/F-[0-9a-f]{6}/)[0];
+    runReview(repo, ["again", "--", `reject ${id}: intentional`]);
+    git(repo, "commit", "--amend", "-m", "change, amended");
+    const again = command(process.execPath, [...ENTRY, "--dir", repo, "again"], { cwd: repo, env: reviewEnv(fakeLogPath(repo)), allowFailure: true });
+    assert.match(again.stderr, /branch history changed since the last review/);
+    assert.equal(sessions(repo)[0].session.active, true);
+    const next = runReview(repo, ["branch", "main"]);
+    assert.match(next.result.stdout, /Notice: Previous session .* ended because the branch history no longer continues .* It inherited \d+ prior findings? and the decisions on them\./);
+    assert.equal(sessions(repo)[1].session.ledger.findings[id].disposition, "rejected");
+  });
+
+  test(`[${B.name}] job controls create nothing in a repository that has never had a review`, () => {
+    const repo = createRepo();
+    const exclude = fs.readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8");
+    for (const action of ["status", "result", "cite", "cancel", "reset", "prune"]) {
+      command(process.execPath, [...ENTRY, action, "--dir", repo], { cwd: repo, allowFailure: true });
+    }
+    assert.equal(fs.existsSync(path.join(repo, "tmp")), false);
+    assert.equal(fs.readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8"), exclude);
+  });
+
+  test(`[${B.name}] prune leaves what it cannot read, a newer version's state, and anything behind a link`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    runReview(repo);
+    runReview(repo, ["new", "working"]);
+    const root = path.join(repo, ...B.artifactSegments);
+    const [retired] = sessions(repo);
+    for (const [name, contents] of [["901-damaged", "{ not json"], ["902-newer", JSON.stringify({ version: 99, active: false })]]) {
+      fs.mkdirSync(path.join(root, name));
+      fs.writeFileSync(path.join(root, name, "session.json"), contents, "utf8");
+    }
+    fs.mkdirSync(path.join(root, "903-missing"));
+    const outside = scratchDir(`${B.name}-review-outside-`);
+    fs.writeFileSync(path.join(outside, "keep.txt"), "outside\n", "utf8");
+    const [{ job }] = jobs(repo).filter(({ job: entry }) => path.basename(entry.task_directory) === retired.name);
+    fs.mkdirSync(path.join(retired.directory, "context"), { recursive: true });
+    fs.symlinkSync(outside, path.join(retired.directory, "context", job.id));
+    command(process.execPath, [...ENTRY, "prune", "--older-than", "0", "--dir", repo], { cwd: repo });
+    for (const name of ["901-damaged", "902-newer", "903-missing"]) assert.ok(fs.existsSync(path.join(root, name)), name);
+    assert.ok(fs.existsSync(path.join(outside, "keep.txt")));
+  });
+
+  test(`[${B.name}] help before -- wins even before a reviewer is chosen`, () => {
+    const repo = createRepo();
+    const result = command(process.execPath, [ENTRY_SCRIPT, "working", "--help"], { cwd: repo, env: reviewEnv(fakeLogPath(repo)) });
+    assert.match(result.stdout, /^Cross Review/);
+  });
+
+  test(`[${B.name}] cite without an id refuses another checkout's review`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    runReview(repo);
+    git(repo, "stash");
+    git(repo, "checkout", "-b", "unreviewed");
+    const cited = command(process.execPath, [...ENTRY, "cite", "--dir", repo], { cwd: repo, allowFailure: true });
+    assert.notEqual(cited.status, 0);
+    assert.match(cited.stderr, new RegExp(`No ${B.label} review has run on unreviewed\\. Pass a job ID`));
+  });
+
+  test(`[${B.name}] prune removes old finished jobs and inactive sessions and keeps the active one`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    runReview(repo);
+    runReview(repo, ["new", "working"]);
+    const [retired, active] = sessions(repo);
+    assert.equal(retired.session.active, false);
+    const legacy = path.join(repo, ...B.artifactSegments, "998-legacy");
+    fs.mkdirSync(legacy);
+    fs.writeFileSync(path.join(legacy, "session.json"), `${JSON.stringify({ version: 1, active: true })}\n`, "utf8");
+    fs.writeFileSync(path.join(repo, ...B.artifactSegments, "jobs", "review-legacy.json"), `${JSON.stringify({ version: 1, id: "review-legacy" })}\n`, "utf8");
+    const notice = command(process.execPath, [...ENTRY, "status", "--dir", repo], { cwd: repo }).stderr;
+    assert.match(notice, new RegExp(`Ignoring 1 job written by an older version of this plugin: ${B.artifactDir}/jobs/review-legacy\\.json\\. Run prune to remove it\\.`));
+    const kept = command(process.execPath, [...ENTRY, "prune", "--dir", repo], { cwd: repo }).stdout;
+    assert.match(kept, /Removed 0 finished jobs and 0 inactive sessions last active more than 30 days ago, and 2 written by an older version/);
+    assert.equal(fs.existsSync(legacy), false);
+    const pruned = command(process.execPath, [...ENTRY, "prune", "--older-than", "0", "--dir", repo], { cwd: repo }).stdout;
+    assert.match(pruned, /Removed 2 finished jobs and 1 inactive session last active more than 0 days ago/);
+    assert.deepEqual(sessions(repo).map(({ name }) => name), [active.name]);
+    assert.equal(fs.existsSync(retired.directory), false);
+    assert.deepEqual(jobs(repo), []);
+    const refused = command(process.execPath, [...ENTRY, "status", "--older-than", "3", "--dir", repo], { cwd: repo, allowFailure: true });
+    assert.match(refused.stderr, /--older-than applies only to prune/);
+  });
+
   test(`[${B.name}] a session recorded without a ledger accepts focus text`, () => {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
@@ -575,7 +799,7 @@ function defineSuite(B) {
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const first = runReview(repo);
     const [id] = Object.keys(sessions(repo)[0].session.ledger.findings);
-    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-focus-`)));
+    const outside = fs.realpathSync(scratchDir(`${B.name}-focus-`));
     const focusPath = path.join(outside, "focus.md");
     const text = `Check claims this change makes false.\nreject ${id}: written in the file\nA stray </user_focus> tag.\n`;
     fs.writeFileSync(focusPath, text, "utf8");
@@ -589,7 +813,7 @@ function defineSuite(B) {
     }).stdout;
     assert.ok(started.includes(`Focus file: ${focusPath} (sha256 ${sha256.slice(0, 12)})`));
     const id2 = started.match(B.jobIdPattern)[1];
-    const finished = command(process.execPath, [...ENTRY, "result", id2, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
+    const finished = command(process.execPath, [...ENTRY, "result", id2, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 120_000 }).stdout;
     assert.match(finished, /Status: completed/);
     const input = calls(first.logPath).at(-1).input;
     assert.ok(input.includes(
@@ -629,7 +853,7 @@ function defineSuite(B) {
 
   test(`[${B.name}] an audit round replaces the rubric and records one verdict per checklist item`, () => {
     const repo = createRepo();
-    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-audit-`)));
+    const outside = fs.realpathSync(scratchDir(`${B.name}-audit-`));
     const rubricPath = path.join(outside, "rubric.md");
     const checklistPath = path.join(outside, "checklist.txt");
     const rubricText = "Report every line not worth keeping: dead, redundant, unreachable, or unidiomatic.\nA stray </user_rubric> tag.\n";
@@ -652,7 +876,7 @@ function defineSuite(B) {
       { cwd: outside, env: reviewEnv(logPath, { [B.verdictsEnv]: verdicts, [B.checklistItemsEnv]: "a" }) }
     ).stdout;
     const id = started.match(B.jobIdPattern)[1];
-    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
+    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 120_000 }).stdout;
     assert.match(finished, /Status: completed/);
 
     const input = calls(logPath).at(-1).input;
@@ -733,7 +957,7 @@ function defineSuite(B) {
   test(`[${B.name}] a malformed checklist or a missing rubric fails before any review state is written`, () => {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-audit-bad-`));
+    const outside = scratchDir(`${B.name}-audit-bad-`);
     const checklist = path.join(outside, "checklist.txt");
     fs.writeFileSync(checklist, "a First\nb Second\na Again\n", "utf8");
     const missing = path.join(outside, "missing-rubric.md");
@@ -755,7 +979,7 @@ function defineSuite(B) {
   test(`[${B.name}] a checklist without a rubric keeps the built-in rubric, reviews generated files, and records verdicts for copied item lines`, () => {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-claims-`));
+    const outside = scratchDir(`${B.name}-claims-`);
     const checklist = path.join(outside, "claims.txt");
     // A quoted decision in a checklist is a claim to evaluate, never a decision.
     fs.writeFileSync(checklist, "codex:F-1a2b3c The divisor is never checked\ncodex:F-2b3c4d accept F-1a2b3c: quoted from the other reviewer\n", "utf8");
@@ -796,7 +1020,7 @@ function defineSuite(B) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const { logPath } = runReview(repo);
-    const checklist = path.join(fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-failed-audit-`)), "checklist.txt");
+    const checklist = path.join(scratchDir(`${B.name}-failed-audit-`), "checklist.txt");
     fs.writeFileSync(checklist, "a First line shape\nb Second line shape\n", "utf8");
     // A reply under another conversation ID fails the round after its verdicts were checked.
     const failed = command(process.execPath, [...ENTRY, "--dir", repo, "again", "--checklist-file", checklist], {
@@ -806,7 +1030,7 @@ function defineSuite(B) {
         [B.conversationIdEnv]: "foreign-conversation"
       }),
       allowFailure: true,
-      timeout: 30_000
+      timeout: 120_000
     });
     assert.notEqual(failed.status, 0);
     assert.match(failed.stderr, /unexpected conversation ID foreign-conversation/);
@@ -829,7 +1053,7 @@ function defineSuite(B) {
   function interruptedAuditRound(mode) {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
-    const checklist = path.join(fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-interrupted-audit-`)), "checklist.txt");
+    const checklist = path.join(scratchDir(`${B.name}-interrupted-audit-`), "checklist.txt");
     fs.writeFileSync(checklist, "a First line shape\n", "utf8");
     const logPath = fakeLogPath(repo);
     const result = command(
@@ -842,7 +1066,7 @@ function defineSuite(B) {
           INTERRUPT_AFTER_VERDICTS: mode
         }),
         allowFailure: true,
-        timeout: 30_000
+        timeout: 120_000
       }
     );
     return { repo, logPath, result };
@@ -869,7 +1093,10 @@ function defineSuite(B) {
     const { path: jobFile, job: interrupted } = jobs(repo)[0];
     assert.equal(interrupted.status, "running");
     assert.deepEqual(verdictsFiles(interrupted.task_directory), ["001-working.verdicts.json"]);
-    assert.equal(fs.existsSync(interrupted.artifact), false);
+    // An unapplied round is staged, so nothing reads it as a result.
+    assert.equal(interrupted.artifact, null);
+    assert.equal(interrupted.coverage, undefined);
+    assert.equal(fs.existsSync(interrupted.pending.artifact), false);
 
     const again = command(process.execPath, [...ENTRY, "--dir", repo, "again"], {
       cwd: repo,
@@ -881,7 +1108,8 @@ function defineSuite(B) {
     const recovered = JSON.parse(fs.readFileSync(jobFile, "utf8"));
     assert.equal(recovered.status, "failed");
     assert.match(recovered.error, /worker exited/);
-    assert.equal(recovered.unapplied_artifact, interrupted.artifact);
+    assert.equal(recovered.unapplied_artifact, interrupted.pending.artifact);
+    assert.equal(recovered.pending, undefined);
     for (const key of ["coverage", "coverage_warning", "verdicts_file"]) assert.equal(recovered[key], undefined, key);
     assert.deepEqual(verdictsFiles(interrupted.task_directory), []);
   });
@@ -891,16 +1119,17 @@ function defineSuite(B) {
     assert.equal(result.signal, "SIGKILL");
     const { path: jobFile, job: interrupted } = jobs(repo)[0];
     assert.equal(interrupted.status, "running");
-    assert.ok(interrupted.coverage);
-    assert.equal(interrupted.verdicts_file, path.join(interrupted.task_directory, "001-working.verdicts.json"));
+    assert.ok(interrupted.pending.coverage);
+    assert.equal(interrupted.verdicts_file, undefined);
+    assert.equal(interrupted.pending.verdicts_file, path.join(interrupted.task_directory, "001-working.verdicts.json"));
     assert.deepEqual(verdictsFiles(interrupted.task_directory), ["001-working.verdicts.json"]);
 
     const cancelled = command(process.execPath, [...ENTRY, "cancel", interrupted.id, "--dir", repo]).stdout;
     assert.match(cancelled, new RegExp(`Job ${interrupted.id} had already stopped and is now failed\\. The review worker exited`));
     const recovered = JSON.parse(fs.readFileSync(jobFile, "utf8"));
     assert.equal(recovered.status, "failed");
-    assert.equal(recovered.unapplied_artifact, interrupted.artifact);
-    for (const key of ["coverage", "coverage_warning", "verdicts_file"]) assert.equal(recovered[key], undefined, key);
+    assert.equal(recovered.unapplied_artifact, interrupted.pending.artifact);
+    for (const key of ["coverage", "coverage_warning", "verdicts_file", "pending"]) assert.equal(recovered[key], undefined, key);
     assert.deepEqual(verdictsFiles(interrupted.task_directory), []);
     const status = command(process.execPath, [...ENTRY, "status", interrupted.id, "--dir", repo]).stdout;
     assert.match(status, /^Status: failed$/m);
@@ -932,7 +1161,7 @@ function defineSuite(B) {
 
   test(`[${B.name}] cite stays inside the repository and reports ranges past the file`, () => {
     const repo = createRepo();
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-outside-`));
+    const outside = scratchDir(`${B.name}-outside-`);
     fs.writeFileSync(path.join(outside, "hosts.yml"), "MARKER-OUTSIDE\n", "utf8");
     fs.symlinkSync(outside, path.join(repo, "link"), "dir");
     fs.writeFileSync(path.join(repo, "example.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\n", "utf8");
@@ -994,19 +1223,18 @@ function defineSuite(B) {
 
   test(`[${B.name}] a reset during a running review is not overwritten by its result`, async () => {
     const repo = createRepo();
+    const hold = holdFile();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = fakeLogPath(repo);
     const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
-      env: reviewEnv(logPath, { [B.delayEnv]: "2500" })
+      env: reviewEnv(logPath, { [HOLD]: hold })
     });
     const id = started.stdout.match(B.jobIdPattern)?.[1];
-    for (let attempt = 0; attempt < 250; attempt += 1) {
-      if (fs.existsSync(logPath) && calls(logPath).length === 1) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    assert.ok(await waitFor(() => fs.existsSync(logPath) && calls(logPath).length === 1), "the reviewer never started");
     assert.match(command(process.execPath, [...ENTRY, "reset", "--dir", repo]).stdout, /Reset active/);
-    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
+    release(hold);
+    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 120_000 }).stdout;
     assert.match(finished, /Status: completed/);
     const session = sessions(repo)[0].session;
     assert.equal(session.active, false);
@@ -1167,6 +1395,7 @@ function defineSuite(B) {
 
   test(`[${B.name}] an explicit session rechecks its destination before moving there`, async () => {
     const repo = createRepo();
+    const hold = holdFile();
     const base = git(repo, "rev-parse", "HEAD");
     fs.writeFileSync(path.join(repo, "example.txt"), "reviewed\n", "utf8");
     git(repo, "add", "example.txt");
@@ -1195,16 +1424,13 @@ function defineSuite(B) {
       ],
       {
         cwd: repo,
-        env: reviewEnv(first.logPath, { [B.delayEnv]: "1500" })
+        env: reviewEnv(first.logPath, { [HOLD]: hold })
       }
     );
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
 
-    for (let attempt = 0; attempt < 250; attempt += 1) {
-      if (calls(first.logPath).length === 2) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    assert.ok(await waitFor(() => calls(first.logPath).length === 2), "the reviewer never started");
     assert.equal(calls(first.logPath).length, 2);
     const lateDirectory = path.join(repo, ...B.artifactSegments, "999-late-destination");
     fs.mkdirSync(lateDirectory);
@@ -1222,12 +1448,9 @@ function defineSuite(B) {
       last_head: fixed
     }, null, 2)}\n`, "utf8");
 
+    release(hold);
     let status;
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout;
-      if (status.includes("Status: failed")) break;
-    }
+    await waitFor(() => (status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout).includes("Status: failed"));
     assert.match(status, /Status: failed/);
     assert.match(status, /session late-destination-session is already active/);
     assert.match(status, /new isolated delta session/);
@@ -1255,31 +1478,25 @@ function defineSuite(B) {
 
   test(`[${B.name}] an ordinary review can complete while preparation state is locked`, async () => {
     const repo = createRepo();
+    const hold = holdFile();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = fakeLogPath(repo);
     const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
-      env: reviewEnv(logPath, { [B.delayEnv]: "1500" })
+      env: reviewEnv(logPath, { [HOLD]: hold })
     });
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
 
-    // A detached worker can take many seconds to start on a busy machine.
-    for (let attempt = 0; attempt < 1500; attempt += 1) {
-      if (fs.existsSync(logPath) && calls(logPath).length === 1) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    assert.ok(await waitFor(() => fs.existsSync(logPath) && calls(logPath).length === 1), "the reviewer never started");
     assert.equal(calls(logPath).length, 1);
     const lockPath = path.join(repo, ...B.artifactSegments, ".state.lock");
     fs.writeFileSync(lockPath, `${process.pid}\n`, "utf8");
+    release(hold);
 
     let status;
     try {
-      for (let attempt = 0; attempt < 60; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout;
-        if (status.includes("Status: completed")) break;
-      }
+      await waitFor(() => (status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout).includes("Status: completed"));
     } finally {
       fs.rmSync(lockPath, { force: true });
     }
@@ -1476,11 +1693,7 @@ function defineSuite(B) {
     assert.ok(id);
 
     let status;
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout;
-      if (status.includes("Status: completed")) break;
-    }
+    await waitFor(() => (status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout).includes("Status: completed"));
     assert.match(status, /Status: completed/);
     const result = command(process.execPath, [...ENTRY, "result", id, "--dir", repo]).stdout;
     assert.match(result, /Example defect/);
@@ -1488,6 +1701,7 @@ function defineSuite(B) {
 
   test(`[${B.name}] a moving checkout retires the advanced review without advancing its accepted session`, async () => {
     const repo = createRepo();
+    const hold = holdFile();
     const base = git(repo, "rev-parse", "HEAD");
     fs.writeFileSync(path.join(repo, "example.txt"), "reviewed\n", "utf8");
     git(repo, "add", "example.txt");
@@ -1515,27 +1729,21 @@ function defineSuite(B) {
       ],
       {
         cwd: repo,
-        env: reviewEnv(logPath, { [B.delayEnv]: "1500" })
+        env: reviewEnv(logPath, { [HOLD]: hold })
       }
     );
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
 
-    for (let attempt = 0; attempt < 250; attempt += 1) {
-      if (fs.existsSync(logPath) && calls(logPath).length === 2) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    assert.ok(await waitFor(() => fs.existsSync(logPath) && calls(logPath).length === 2), "the reviewer never started");
     assert.equal(calls(logPath).length, 2);
     fs.writeFileSync(path.join(repo, "example.txt"), "moved again\n", "utf8");
     git(repo, "add", "example.txt");
     git(repo, "commit", "-m", "move checkout during resumed review");
 
+    release(hold);
     let status;
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout;
-      if (status.includes("Status: failed")) break;
-    }
+    await waitFor(() => (status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout).includes("Status: failed"));
     assert.match(status, /Status: failed/);
     assert.match(status, /Repository HEAD moved during review/);
     assert.match(status, /new isolated delta session/);
@@ -1577,6 +1785,7 @@ function defineSuite(B) {
 
   test(`[${B.name}] a same-SHA named-to-detached checkout change retires an explicit resumed session`, async () => {
     const repo = createRepo();
+    const hold = holdFile();
     const base = git(repo, "rev-parse", "HEAD");
     fs.writeFileSync(path.join(repo, "example.txt"), "reviewed\n", "utf8");
     git(repo, "add", "example.txt");
@@ -1603,26 +1812,20 @@ function defineSuite(B) {
       ],
       {
         cwd: repo,
-        env: reviewEnv(first.logPath, { [B.delayEnv]: "1500" })
+        env: reviewEnv(first.logPath, { [HOLD]: hold })
       }
     );
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
 
-    for (let attempt = 0; attempt < 250; attempt += 1) {
-      if (calls(first.logPath).length === 2) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    assert.ok(await waitFor(() => calls(first.logPath).length === 2), "the reviewer never started");
     assert.equal(calls(first.logPath).length, 2);
     git(repo, "checkout", "--detach", fixed);
     assert.equal(git(repo, "rev-parse", "HEAD"), fixed);
 
+    release(hold);
     let status;
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout;
-      if (status.includes("Status: failed")) break;
-    }
+    await waitFor(() => (status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout).includes("Status: failed"));
     assert.match(status, /Status: failed/);
     assert.match(status, /Repository checkout identity changed during review: expected main, found detached-/);
     assert.match(status, /new isolated delta session/);
@@ -1637,11 +1840,12 @@ function defineSuite(B) {
 
   test(`[${B.name}] a second review cannot create a stuck job for an active session`, async () => {
     const repo = createRepo();
+    const hold = holdFile();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = path.join(repo, `fake-${B.name}.jsonl`);
     const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
-      env: reviewEnv(logPath, { [B.delayEnv]: "1000" })
+      env: reviewEnv(logPath, { [HOLD]: hold })
     });
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
@@ -1659,6 +1863,7 @@ function defineSuite(B) {
 
   test(`[${B.name}] an explicit session reports its in-flight focused review instead of starting another`, () => {
     const repo = createRepo();
+    const hold = holdFile();
     const base = git(repo, "rev-parse", "HEAD");
     fs.writeFileSync(path.join(repo, "example.txt"), "reviewed\n", "utf8");
     git(repo, "add", "example.txt");
@@ -1675,7 +1880,7 @@ function defineSuite(B) {
     const started = command(
       process.execPath,
       [...ENTRY, "--dir", repo, "--resume-session", sessionId, "range", `${reviewed}..${fixed}`, "--background"],
-      { cwd: repo, env: reviewEnv(logPath, { [B.delayEnv]: "1000" }) }
+      { cwd: repo, env: reviewEnv(logPath, { [HOLD]: hold }) }
     );
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
@@ -1788,7 +1993,7 @@ function defineSuite(B) {
       cwd: repo,
       env: reviewEnv(fakeLogPath(repo)),
       allowFailure: true,
-      timeout: 30_000
+      timeout: 120_000
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Simulated failure writing \S+\/session\.json .*session was retired/);
@@ -1893,21 +2098,22 @@ function defineSuite(B) {
       cwd: repo,
       env: reviewEnv(logPath),
       allowFailure: true,
-      timeout: 30_000
+      timeout: 120_000
     });
     assert.equal(killed.signal, "SIGKILL");
     const { path: jobFile, job: interrupted } = jobs(repo)[0];
     assert.equal(interrupted.status, "running");
     assert.ok(interrupted.reviewer_started_at);
-    assert.ok(interrupted.rendered_result);
-    assert.ok(fs.existsSync(interrupted.artifact));
+    assert.equal(interrupted.rendered_result, undefined);
+    assert.ok(interrupted.pending.rendered_result);
+    assert.ok(fs.existsSync(interrupted.pending.artifact));
 
     const cancelled = command(process.execPath, [...ENTRY, "cancel", interrupted.id, "--dir", repo]).stdout;
     const recovered = JSON.parse(fs.readFileSync(jobFile, "utf8"));
     assert.equal(recovered.status, "failed");
     assert.match(recovered.error, /^The review worker exited before recording a terminal result\. .*session was retired/);
     assert.equal(recovered.pid, null);
-    assert.equal(recovered.unapplied_artifact, interrupted.artifact);
+    assert.equal(recovered.unapplied_artifact, interrupted.pending.artifact);
     assert.equal(recovered.artifact, null);
     assert.equal(recovered.result_summary, null);
     assert.equal(recovered.rendered_result, null);
@@ -1959,7 +2165,7 @@ function defineSuite(B) {
     const canonicalRepo = sessions(repo)[0].session.repo_root;
     const root = path.join(repo, ...B.artifactSegments);
     const jobsDirectory = path.join(root, "jobs");
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), `${B.name}-review-outside-`));
+    const outside = scratchDir(`${B.name}-review-outside-`);
     fs.writeFileSync(path.join(outside, "session.json"), `${JSON.stringify({
       version: 2,
       session_id: "outside-session",
@@ -2054,7 +2260,7 @@ function defineSuite(B) {
     assert.doesNotMatch(mismatchedStatus, /mismatched-session/);
   });
 
-  test(`[${B.name}] a diff too large to inline is handed over as git instructions`, { timeout: 60_000 }, () => {
+  test(`[${B.name}] a working diff too large to inline is handed over as files from the checked tree`, { timeout: 120_000 }, () => {
     const repo = createRepo();
     const bigPath = path.join(repo, "big.txt");
     fs.writeFileSync(bigPath, `${"a".repeat(9 * 1024 * 1024)}\n`, "utf8");
@@ -2065,8 +2271,10 @@ function defineSuite(B) {
     assert.equal(result.status, 0);
     const input = calls(logPath)[0].input;
     assert.ok(Buffer.byteLength(input) < 64 * 1024, `prompt is ${Buffer.byteLength(input)} bytes`);
-    assert.match(input, /The change was too large to inline; <repository_context> below summarizes it and tells you how to fetch the patch with git\./);
-    assert.match(input, /### Unstaged diff\n\nCommand: `git diff -- <path>`\n\n- big\.txt/);
+    assert.match(input, /The change was too large to inline; <repository_context> below summarizes it and lists the patch files written for you to read\./);
+    const full = input.match(/The full diff is at (\S+\/000-full\.patch)/)[1];
+    assert.match(fs.readFileSync(full, "utf8"), /^diff --git a\/big\.txt b\/big\.txt/);
+    assert.doesNotMatch(input, /git --literal-pathspecs diff -- <path>/);
     assert.doesNotMatch(input, /^diff --git/m);
   });
 
@@ -2090,6 +2298,212 @@ function defineSuite(B) {
     assert.match(input, /do not fetch or open them\. Values shown as \[redacted\] are secrets/);
     assert.ok(input.indexOf("## Files omitted for safety") < input.indexOf("## Unstaged diff"));
     assert.doesNotMatch(input, /hunter2|PRIVATE KEY-----\nMIIB|AKIAIOSFODNN7EXAMPLE|ghp_abcdefghijklmnopqrstuvwxyz0123456789/);
+  });
+
+  test(`[${B.name}] every line of a private key is redacted on either side of the change, and the code around it stays`, () => {
+    const repo = createRepo();
+    // Made-up body lines, not a key.
+    const body = Array.from({ length: 12 }, (_, index) => `QkVEWS1MSU5FLU5PVC1BLUtFWS0${index}`);
+    const key = (lines) => `-----BEGIN OPENSSH PRIVATE KEY-----\n${lines.join("\n")}\n-----END OPENSSH PRIVATE KEY-----\n`;
+    const fixture = (value) => `test("signs", () => {\nconst KEY = \`${key(body)}\`;\nconst value = ${value};\n});\n`;
+    fs.writeFileSync(path.join(repo, "deploy.txt"), key(body), "utf8");
+    fs.writeFileSync(path.join(repo, "removed.txt"), `header\n${key(body)}`, "utf8");
+    fs.writeFileSync(path.join(repo, "signing.test.js"), fixture(1), "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-m", "add files");
+    const base = git(repo, "rev-parse", "HEAD");
+    fs.writeFileSync(path.join(repo, "deploy.txt"), key(body.map((line, index) => (index === 6 ? "Q0hBTkdFRC1CT0RZ" : line))), "utf8");
+    fs.writeFileSync(path.join(repo, "removed.txt"), "header\n", "utf8");
+    // The hunk starts below the BEGIN line, so it shows body lines with no marker.
+    fs.writeFileSync(path.join(repo, "signing.test.js"), fixture(2), "utf8");
+    git(repo, "commit", "-am", "rotate, remove, and edit a fixture");
+    const { result, logPath } = runReview(repo, ["range", `${base}..HEAD`]);
+    const input = calls(logPath)[0].input;
+    assert.doesNotMatch(input, /QkVEWS1MSU5F|Q0hBTkdFRC1CT0RZ|PRIVATE KEY-----/);
+    assert.doesNotMatch(input, /contains a private key|Omitted for safety|## Files omitted/);
+    assert.match(input, /^ \[redacted\]\n \[redacted\]\n `;\n-const value = 1;\n\+const value = 2;\n \}\);$/m);
+    assert.match(input, /^-\[redacted\]\n\+\[redacted\]$/m);
+    assert.match(input, /^ header\n(?:-\[redacted\]\n){14}/m);
+    assert.match(result.stdout, /^Redacted: deploy\.txt, removed\.txt, signing\.test\.js$/m);
+    assert.doesNotMatch(result.stdout, /^Omitted for safety:/m);
+  });
+
+  test(`[${B.name}] a working-tree key is located in the text Git compared, and a file whose clean filter changes it is left out`, () => {
+    const repo = createRepo();
+    // Made-up body lines, not a key.
+    const body = Array.from({ length: 12 }, (_, index) => `QkVEWS1MSU5FLU5PVC1BLUtFWS0${index}`);
+    const edited = body.map((line, index) => (index === 6 ? "Q0hBTkdFRC1CT0RZ" : line));
+    const key = (lines) => `-----BEGIN RSA PRIVATE KEY-----\n${lines.join("\n")}\n-----END RSA PRIVATE KEY-----\nafter\n`;
+    const envelope = (lines) => `ENVELOPE OPEN\n${lines.join("\n")}\nENVELOPE CLOSE\nafter\n`;
+    git(repo, "config", "core.autocrlf", "false");
+    git(repo, "config", "filter.envelope.clean", "sed -e 's/^ENVELOPE OPEN$/-----BEGIN RSA PRIVATE KEY-----/' -e 's/^ENVELOPE CLOSE$/-----END RSA PRIVATE KEY-----/'");
+    fs.writeFileSync(path.join(repo, ".gitattributes"), "wrapped.txt filter=envelope\ncrlf.txt text eol=crlf\n", "utf8");
+    fs.writeFileSync(path.join(repo, "wrapped.txt"), envelope(body), "utf8");
+    fs.writeFileSync(path.join(repo, "crlf.txt"), key(body).replaceAll("\n", "\r\n"), "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-m", "keys");
+    // The working file has no markers, but Git compares it with markers restored.
+    fs.writeFileSync(path.join(repo, "wrapped.txt"), envelope(edited), "utf8");
+    fs.writeFileSync(path.join(repo, "crlf.txt"), key(edited).replaceAll("\n", "\r\n"), "utf8");
+    const { result, logPath } = runReview(repo, ["working"], { [B.fileEnv]: "wrapped.txt", [B.lineStartEnv]: "15" });
+    const input = calls(logPath)[0].input;
+    assert.match(input, /^wrapped\.txt \(holds a private key whose lines the runtime could not locate\)$/m);
+    assert.match(input, /^diff --git a\/crlf\.txt b\/crlf\.txt$/m);
+    assert.doesNotMatch(input, /QkVEWS1MSU5F|Q0hBTkdFRC1CT0RZ/);
+    assert.match(result.stdout, /^Redacted: crlf\.txt$/m);
+  });
+
+  test(`[${B.name}] an untracked link is described, not followed, and fixture URLs are redacted in place`, () => {
+    const repo = createRepo();
+    const outside = scratchDir(`${B.name}-review-outside-`);
+    fs.writeFileSync(path.join(outside, "notes.txt"), "outside the checkout\n", "utf8");
+    fs.symlinkSync(path.join(outside, "notes.txt"), path.join(repo, "linked.txt"));
+    fs.writeFileSync(path.join(repo, "database.yml"), "url: postgres://app:hunter2@localhost/app\n", "utf8");
+    const { result, logPath } = runReview(repo, ["working"]);
+    const input = calls(logPath)[0].input;
+    assert.doesNotMatch(input, /outside the checkout/);
+    assert.match(input, /### linked\.txt\n\(skipped: symbolic link, not followed\)/);
+    assert.match(input, /### database\.yml\n```\nurl: postgres:\/\/app:\[redacted\]@localhost\/app/);
+    assert.doesNotMatch(input, /hunter2/);
+    assert.match(result.stdout, /^Redacted: database\.yml$/m);
+  });
+
+  test(`[${B.name}] cite redacts a private key's lines and shows none from a link to a credential file`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, ".env"), "SECRET=1\n", "utf8");
+    fs.symlinkSync(".env", path.join(repo, "settings.txt"));
+    fs.writeFileSync(path.join(repo, "keyed.txt"), "before\n-----BEGIN RSA PRIVATE KEY-----\nTUFERS1V\n-----END RSA PRIVATE KEY-----\nafter\n", "utf8");
+    fs.writeFileSync(path.join(repo, "unmarked.txt"), "TUFERS1V\n-----END RSA PRIVATE KEY-----\nafter\n", "utf8");
+    runReview(repo, ["working"], { [B.fileEnv]: "settings.txt" });
+    assert.match(command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout, /not shown: the path resolves to a credential file/);
+    runReview(repo, ["new", "working"], { [B.fileEnv]: "keyed.txt", [B.lineStartEnv]: "5" });
+    const cited = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
+    assert.match(cited, /^  2 \| \[redacted\]\n  3 \| \[redacted\]\n  4 \| \[redacted\]\n> 5 \| after$/m);
+    assert.doesNotMatch(cited, /TUFERS1V|PRIVATE KEY/);
+    // An END line with no BEGIN takes the body above it.
+    runReview(repo, ["new", "working"], { [B.fileEnv]: "unmarked.txt", [B.lineStartEnv]: "3" });
+    const unmarked = command(process.execPath, [...ENTRY, "cite", "--dir", repo]).stdout;
+    assert.match(unmarked, /^  1 \| \[redacted\]\n  2 \| \[redacted\]\n> 3 \| after$/m);
+    assert.doesNotMatch(unmarked, /TUFERS1V/);
+  });
+
+  test(`[${B.name}] forced color does not hide a patch from the scan, and a conflict reaches the reviewer`, () => {
+    const repo = createRepo();
+    git(repo, "config", "color.ui", "always");
+    for (let index = 1; index <= 41; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `content ${index}\n`, "utf8");
+    fs.writeFileSync(path.join(repo, "keyish.txt"), "token=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n", "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-m", "many files");
+    const committed = runReview(repo, ["commit", "HEAD"]);
+    const input = calls(committed.logPath)[0].input;
+    const keyish = fs.readFileSync(input.match(/^- (\S+keyish\.txt\.patch) \(scoped commit diff: keyish\.txt\)$/m)[1], "utf8");
+    assert.match(keyish, /^\+token=\[redacted\]$/m);
+    const full = fs.readFileSync(input.match(/The full diff is at (\S+\/000-full\.patch)/)[1], "utf8");
+    assert.doesNotMatch(input + full, /ghp_abcdefghijklmnopqrstuvwxyz0123456789|\u001b\[/);
+
+    git(repo, "checkout", "-q", "-b", "side");
+    fs.writeFileSync(path.join(repo, "example.txt"), "side\n", "utf8");
+    git(repo, "commit", "-qam", "side");
+    git(repo, "checkout", "-q", "main");
+    fs.writeFileSync(path.join(repo, "example.txt"), "main\n", "utf8");
+    git(repo, "commit", "-qam", "main");
+    command("git", ["-C", repo, "merge", "--no-ff", "--no-edit", "side"], { allowFailure: true });
+    const conflicted = runReview(repo, ["new", "working"]);
+    assert.match(calls(conflicted.logPath).at(-1).input, /diff --cc example\.txt[\s\S]*<<<<<<< HEAD/);
+  });
+
+  test(`[${B.name}] a conflicted file with a private key is left out, since its combined diff has no line positions to match`, () => {
+    const repo = createRepo();
+    // A made-up body line, not a key.
+    const keyed = (value) => `-----BEGIN RSA PRIVATE KEY-----\nQkVEWS1MSU5FLU5PVC1BLUtFWQ\n-----END RSA PRIVATE KEY-----\nvalue = ${value}\n`;
+    fs.writeFileSync(path.join(repo, "signing.txt"), keyed("base"), "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-qm", "key");
+    git(repo, "checkout", "-q", "-b", "side");
+    fs.writeFileSync(path.join(repo, "signing.txt"), keyed("side"), "utf8");
+    git(repo, "commit", "-qam", "side");
+    git(repo, "checkout", "-q", "main");
+    fs.writeFileSync(path.join(repo, "signing.txt"), keyed("main"), "utf8");
+    git(repo, "commit", "-qam", "main");
+    command("git", ["-C", repo, "merge", "--no-ff", "--no-edit", "side"], { allowFailure: true });
+    const { result, logPath } = runReview(repo, ["working"]);
+    const input = calls(logPath).at(-1).input;
+    assert.match(input, /^signing\.txt \(holds a private key whose lines the runtime could not locate\)$/m);
+    assert.doesNotMatch(input, /QkVEWS1MSU5F|diff --cc signing\.txt/);
+    assert.match(result.stdout, /^Omitted for safety: signing\.txt \(holds a private key whose lines the runtime could not locate\)$/m);
+  });
+
+  test(`[${B.name}] a key body change is redacted under color.grep, and a file that replaced a directory arrives with its patch`, () => {
+    const repo = createRepo();
+    git(repo, "config", "color.grep", "always");
+    // Made-up body lines, not a key.
+    const body = Array.from({ length: 12 }, (_, index) => `QkVEWS1MSU5FLU5PVC1BLUtFWS0${index}`);
+    const key = (lines) => `-----BEGIN RSA PRIVATE KEY-----\n${lines.join("\n")}\n-----END RSA PRIVATE KEY-----\n`;
+    fs.writeFileSync(path.join(repo, "deploy.txt"), key(body), "utf8");
+    fs.mkdirSync(path.join(repo, "conf"));
+    fs.writeFileSync(path.join(repo, "conf", "inner.txt"), "token=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n", "utf8");
+    for (let index = 1; index <= 41; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `content ${index}\n`, "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-m", "baseline");
+    const base = git(repo, "rev-parse", "HEAD");
+    fs.writeFileSync(path.join(repo, "deploy.txt"), key(body.map((line, index) => (index === 6 ? "Q0hBTkdFRC1CT0RZ" : line))), "utf8");
+    git(repo, "rm", "-rq", "conf");
+    fs.writeFileSync(path.join(repo, "conf"), "now a file\n", "utf8");
+    for (let index = 1; index <= 41; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `changed ${index}\n`, "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-m", "change");
+    const { logPath } = runReview(repo, ["range", `${base}..HEAD`]);
+    const input = calls(logPath)[0].input;
+    const deploy = fs.readFileSync(input.match(/^- (\S+deploy\.txt\.patch) \(scoped diff: deploy\.txt\)$/m)[1], "utf8");
+    assert.match(deploy, /^-\[redacted\]\n\+\[redacted\]$/m);
+    const conf = fs.readFileSync(input.match(/^- (\S+-conf\.patch) \(scoped diff: conf\)$/m)[1], "utf8");
+    assert.match(conf, /^\+now a file$/m);
+    const full = fs.readFileSync(input.match(/The full diff is at (\S+\/000-full\.patch)/)[1], "utf8");
+    assert.doesNotMatch(input + full, /Q0hBTkdFRC1CT0RZ|QkVEWS1MSU5F|ghp_abcdefghijklmnopqrstuvwxyz0123456789/);
+  });
+
+  test(`[${B.name}] a key-bearing file that becomes a link is handed over with both of its records`, () => {
+    const repo = createRepo();
+    // A made-up body line, not a key.
+    fs.writeFileSync(path.join(repo, "deploy.txt"), "before\n-----BEGIN RSA PRIVATE KEY-----\nQkVEWS1MSU5FLU5PVC1BLUtFWQ\n-----END RSA PRIVATE KEY-----\nafter\n", "utf8");
+    for (let index = 1; index <= 41; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `content ${index}\n`, "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-m", "baseline");
+    const base = git(repo, "rev-parse", "HEAD");
+    fs.rmSync(path.join(repo, "deploy.txt"));
+    fs.symlinkSync("example.txt", path.join(repo, "deploy.txt"));
+    for (let index = 1; index <= 41; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `changed ${index}\n`, "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-m", "link");
+    const { logPath } = runReview(repo, ["range", `${base}..HEAD`]);
+    const input = calls(logPath)[0].input;
+    const records = [...input.matchAll(/^- (\S+deploy\.txt\.patch) \(scoped diff: deploy\.txt\)$/gm)];
+    assert.equal(records.length, 2);
+    const copy = records.map((record) => fs.readFileSync(record[1], "utf8")).join("");
+    assert.match(copy, /^deleted file mode 100644\n[\s\S]*^-before\n(?:-\[redacted\]\n){3}-after\n/m);
+    assert.match(copy, /^new file mode 120000\n[\s\S]*^\+example\.txt$/m);
+    assert.doesNotMatch(copy + input, /QkVEWS1MSU5F/);
+  });
+
+  test(`[${B.name}] a rename travels as a pair, and one into a credential name leaves out both sides`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "settings.yml"), "password: hunter2\n", "utf8");
+    for (let index = 1; index <= 41; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `content ${index}\n`, "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-m", "baseline");
+    const base = git(repo, "rev-parse", "HEAD");
+    git(repo, "mv", "settings.yml", ".env");
+    git(repo, "mv", "file1.txt", "moved.txt");
+    for (let index = 2; index <= 41; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `changed ${index}\n`, "utf8");
+    git(repo, "commit", "-am", "rename and change");
+    const { logPath } = runReview(repo, ["range", `${base}..HEAD`]);
+    const input = calls(logPath)[0].input;
+    assert.match(input, /^\.env \(potential credential or secret\)$/m);
+    assert.match(input, /^settings\.yml \(renamed to or from \.env, which is left out\)$/m);
+    const moved = fs.readFileSync(input.match(/^- (\S+moved\.txt\.patch) \(scoped diff: moved\.txt\)$/m)[1], "utf8");
+    assert.match(moved, /^rename from file1\.txt\nrename to moved\.txt$/m);
+    const full = fs.readFileSync(input.match(/The full diff is at (\S+\/000-full\.patch)/)[1], "utf8");
+    assert.doesNotMatch(input + full, /hunter2/);
   });
 
   test(`[${B.name}] untracked content does not push a small diff off the inline route`, () => {
@@ -2125,15 +2539,13 @@ function defineSuite(B) {
     fs.writeFileSync(path.join(repo, "plain.bin"), Buffer.from([0, 1, 2, 3, 255]));
     const working = runReview(repo, ["working"]);
     const input = calls(working.logPath).at(-1).input;
-    assert.match(input, /tells you how to fetch the patch with git/);
+    assert.match(input, /lists the patch files written for you to read/);
     assert.match(input, /big-key\.txt \(content looks like a credential or private key\)/);
     assert.match(input, /client-state\.db \(content looks like a credential or private key\)/);
-    assert.doesNotMatch(input, /^- big-key\.txt/m);
-    assert.doesNotMatch(input, /^- client-state\.db/m);
-    assert.match(input, /^- big-plain\.txt \(\d+ bytes exceeds the per-file limit\)$/m);
-    assert.match(input, /### Binary untracked files, not retrievable\n\n- plain\.bin/);
-    const catSection = input.match(/### Untracked files\n\nCommand: `cat <path>`[\s\S]*?(?=\n### |\n## |$)/)[0];
-    assert.doesNotMatch(catSection, /plain\.bin/);
+    assert.doesNotMatch(input, /^- \S*big-key\.txt/m);
+    assert.doesNotMatch(input, /^- \S*client-state\.db/m);
+    assert.match(input, /^- big-plain\.txt \(untracked, skipped: \d+ bytes exceeds the per-file limit\)$/m);
+    assert.match(input, /^- plain\.bin \(untracked, skipped: binary content\)$/m);
     assert.doesNotMatch(input, /AKIAIOSFODNN7EXAMPLE/);
   });
 
@@ -2177,28 +2589,54 @@ function defineSuite(B) {
     assert.match(commitInput, /### Commit\n\n[0-9a-f]{40} feature change\nCross Review Test, /);
   });
 
-  test(`[${B.name}] many changed files are handed over as git instructions and secrets stay omitted`, () => {
+  test(`[${B.name}] a committed change too large to inline is handed over as the checked patch files, and secrets stay omitted`, () => {
     const repo = createRepo();
     for (let index = 1; index <= 45; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `content ${index}\n`, "utf8");
     fs.writeFileSync(path.join(repo, ".npmrc"), "//registry/:_authToken=abc\n", "utf8");
     fs.writeFileSync(path.join(repo, "keyish.txt"), "token=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n", "utf8");
     git(repo, "add", "-A");
     git(repo, "commit", "-m", "many files");
-    const { logPath } = runReview(repo, ["commit", "HEAD"]);
+    const { result, logPath } = runReview(repo, ["commit", "HEAD"]);
     const input = calls(logPath)[0].input;
-    assert.match(input, /## Patch\n\nThe change is too large to inline\./);
-    assert.match(input, /### Scoped commit diff\n\nCommand: `git diff [0-9a-f]{40}\.\.[0-9a-f]{40} -- <path>`\n\n- file1\.txt/);
-    assert.equal((input.match(/^- file\d+\.txt$/gm) ?? []).length, 45);
+    assert.match(input, /lists the patch files written for you to read/);
+    assert.match(input, /## Patch files\n\nThe change is too large to inline\./);
+    assert.equal((input.match(/^- \S+-file\d+\.txt\.patch \(scoped commit diff: file\d+\.txt\)$/gm) ?? []).length, 45);
     assert.match(input, /\.npmrc \(potential credential or secret\)/);
-    assert.doesNotMatch(input, /^- \.npmrc/m);
-    assert.match(input, /^- keyish\.txt \(contains credential-looking content; treat the matches as secrets\)$/m);
-    assert.ok(input.indexOf("## Files omitted for safety") < input.indexOf("## Patch\n"));
-    assert.doesNotMatch(input, /_authToken|ghp_abcdefghijklmnopqrstuvwxyz0123456789/);
-    assert.doesNotMatch(input, /^diff --git/m);
+    assert.doesNotMatch(input, /^- \S*npmrc/m);
+    const keyish = fs.readFileSync(input.match(/^- (\S+keyish\.txt\.patch) \(scoped commit diff: keyish\.txt\)$/m)[1], "utf8");
+    assert.match(keyish, /\+token=\[redacted\]/);
+    const full = fs.readFileSync(input.match(/The full diff is at (\S+\/000-full\.patch)/)[1], "utf8");
+    assert.ok(input.indexOf("## Files omitted for safety") < input.indexOf("## Patch files\n"));
+    assert.doesNotMatch(input + full, /_authToken|ghp_abcdefghijklmnopqrstuvwxyz0123456789/);
+    assert.doesNotMatch(input, /^diff --git|git --literal-pathspecs|Fetch the patch yourself/m);
+    assert.match(result.stdout, /^Context: 46 files, [\d.]+ (B|KB) of patch; too large to inline, so the patch was written to files for the reviewer$/m);
   });
 
+  if (B.name === "codex") {
+    test(`[${B.name}] a diff past Git's buffer is collected path by path, each record once`, { timeout: 300_000 }, () => {
+      const repo = createRepo();
+      fs.mkdirSync(path.join(repo, "conf"));
+      fs.writeFileSync(path.join(repo, "conf", "inner.txt"), "inner\n", "utf8");
+      git(repo, "add", "-A");
+      git(repo, "commit", "-qm", "baseline");
+      const base = git(repo, "rev-parse", "HEAD");
+      for (const name of ["big1.txt", "big2.txt"]) fs.writeFileSync(path.join(repo, name), `${name[3].repeat(40 * 1024 * 1024)}\n`, "utf8");
+      git(repo, "rm", "-rq", "conf");
+      fs.writeFileSync(path.join(repo, "conf"), "now a file\n", "utf8");
+      git(repo, "add", "-A");
+      git(repo, "commit", "-qm", "large change");
+      const { result, logPath } = runReview(repo, ["range", `${base}..HEAD`]);
+      assert.equal(result.status, 0);
+      const input = calls(logPath)[0].input;
+      assert.doesNotMatch(input, /## Files omitted for safety/);
+      const full = fs.readFileSync(input.match(/The full diff is at (\S+\/000-full\.patch)/)[1], "utf8");
+      const headers = full.split("\n").filter((line) => line.startsWith("diff --git ")).sort();
+      assert.deepEqual(headers, ["diff --git a/big1.txt b/big1.txt", "diff --git a/big2.txt b/big2.txt", "diff --git a/conf b/conf", "diff --git a/conf/inner.txt b/conf/inner.txt"]);
+    });
+  }
+
   if (B.name === "claude") {
-    test(`[${B.name}] read-only mode gets patch files instead of git instructions`, () => {
+    test(`[${B.name}] read-only mode gets the same patch files`, () => {
       const repo = createRepo();
       for (let index = 1; index <= 45; index += 1) fs.writeFileSync(path.join(repo, `file${index}.txt`), `content ${index}\n`, "utf8");
       fs.writeFileSync(path.join(repo, ".npmrc"), "//registry/:_authToken=abc\n", "utf8");
@@ -2216,40 +2654,229 @@ function defineSuite(B) {
       assert.ok(written.some((name) => /^\d{3}-file1\.txt\.patch$/.test(name)));
       assert.ok(!written.some((name) => name.includes("npmrc")));
       assert.match(fs.readFileSync(path.join(directory, written.find((name) => name.endsWith("file1.txt.patch"))), "utf8"), /^diff --git a\/file1\.txt/);
-      const notesPatch = fs.readFileSync(path.join(directory, written.find((name) => name.endsWith("notes.txt.patch"))), "utf8");
-      assert.match(notesPatch, /\+\[redacted\]\n/);
-      assert.doesNotMatch(notesPatch, /BEGIN PRIVATE KEY/);
-      assert.match(fs.readFileSync(path.join(directory, "000-full.patch"), "utf8"), /\[redacted\]/);
+      assert.match(fs.readFileSync(path.join(directory, written.find((name) => name.endsWith("notes.txt.patch"))), "utf8"), /^@@ -0,0 \+1,2 @@\n\+\[redacted\]\n\+\[redacted\]\n$/m);
+      assert.doesNotMatch(fs.readFileSync(path.join(directory, "000-full.patch"), "utf8"), /PRIVATE KEY|\+abc/);
       assert.match(input, /\.npmrc \(potential credential or secret\)/);
-      assert.match(input, /## Files with credential-looking content[\s\S]*- notes\.txt/);
       assert.doesNotMatch(input, /_authToken|BEGIN PRIVATE KEY/);
     });
   }
 
+  test(`[${B.name}] status settles a review whose worker died, and stops what its reviewer started`, async () => {
+    const repo = createRepo();
+    const { id, env, helper } = await startHeldReview(repo);
+    const { job } = jobs(repo)[0];
+    process.kill(job.pid, "SIGKILL");
+    assert.ok(await waitFor(() => !alive(job.pid)));
+    const started = Date.now();
+    const waited = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, env, timeout: 120_000 }).stdout;
+    assert.ok(Date.now() - started < 50_000, "result --wait waited out its whole window for a dead worker");
+    assert.match(waited, /^Status: failed$/m);
+    assert.match(waited, /worker exited before recording a terminal result/);
+    assert.doesNotMatch(waited, /Still running/);
+    assert.equal(sessions(repo)[0].session.active, false);
+    assert.ok(await waitFor(() => !alive(job.reviewer_pid) && !alive(helper), 10_000), "the reviewer or its helper outlived the recovery");
+  });
+
+  test(`[${B.name}] cancel returns once the session is retired, after stopping what the reviewer started`, async () => {
+    const repo = createRepo();
+    const { id, env, helper } = await startHeldReview(repo);
+    const cancelled = command(process.execPath, [...ENTRY, "cancel", id, "--dir", repo], { cwd: repo, env, timeout: 60_000 }).stdout;
+    assert.match(cancelled, new RegExp(`Cancelled ${B.label} review job ${id}\\.`));
+    const { job } = jobs(repo).find((entry) => entry.job.id === id);
+    assert.equal(job.status, "cancelled");
+    assert.equal(sessions(repo)[0].session.active, false);
+    assert.ok(await waitFor(() => !alive(helper), 10_000), "the reviewer's helper outlived the cancel");
+    const again = command(process.execPath, [...ENTRY, "--dir", repo, "again"], { cwd: repo, env, allowFailure: true });
+    assert.notEqual(again.status, 0);
+    assert.match(again.stderr, /retired/);
+    assert.ok(jobs(repo).every((entry) => !["queued", "running"].includes(entry.job.status)));
+  });
+
+  test(`[${B.name}] cancel waits for a helper that ignores SIGTERM`, async () => {
+    const repo = createRepo();
+    const { id, env, helper } = await startHeldReview(repo, { [`${PREFIX}_HELPER_IGNORES_TERM`]: "1" });
+    const cancelled = command(process.execPath, [...ENTRY, "cancel", id, "--dir", repo], { cwd: repo, env, timeout: 60_000 }).stdout;
+    assert.match(cancelled, new RegExp(`Cancelled ${B.label} review job ${id}\\.`));
+    assert.equal(alive(helper), false, "the helper outlived the cancelled round");
+  });
+
+  test(`[${B.name}] a cancel recorded before the worker claims the job stops it there`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const { logPath } = runReview(repo);
+    const [{ job: done }] = jobs(repo);
+    const queuedPath = path.join(repo, ...B.artifactSegments, "jobs", "review-cancel-before-claim.json");
+    fs.writeFileSync(queuedPath, `${JSON.stringify({
+      ...done,
+      id: "review-cancel-before-claim",
+      status: "queued",
+      pid: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    })}\n`, "utf8");
+    fs.writeFileSync(path.join(repo, ...B.artifactSegments, "jobs", "review-cancel-before-claim.cancel"), "requested\n", "utf8");
+    const run = command(process.execPath, [...ENTRY, "__run-job", "review-cancel-before-claim", "--dir", repo], { cwd: repo, env: reviewEnv(logPath), allowFailure: true });
+    assert.notEqual(run.status, 0);
+    const job = JSON.parse(fs.readFileSync(queuedPath, "utf8"));
+    assert.equal(job.status, "cancelled");
+    assert.equal(calls(logPath).length, 1);
+  });
+
+  test(`[${B.name}] a new session that fails before the reviewer starts gives the branch back its session`, () => {
+    const repo = createRepo();
+    const file = path.join(repo, "example.txt");
+    fs.writeFileSync(file, "changed\n", "utf8");
+    runReview(repo);
+    const [previous] = sessions(repo);
+    const env = reviewEnv(fakeLogPath(repo), { EDIT_BEFORE_COLLECT: file, NODE_OPTIONS: `--import=${EDIT_BEFORE_COLLECT}` });
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "new", "working", "--background"], { cwd: repo, env });
+    const id = started.stdout.match(B.jobIdPattern)?.[1];
+    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "2", "--dir", repo], { cwd: repo, env, timeout: 150_000 }).stdout;
+    assert.match(finished, /Status: failed/);
+    const [restored, replacement] = sessions(repo);
+    assert.equal(restored.name, previous.name);
+    assert.equal(restored.session.active, true);
+    assert.equal(replacement.session.active, false);
+    assert.match(replacement.session.reset_reason, /failed before the reviewer started/);
+  });
+
+  test(`[${B.name}] a reset made while a round runs survives that round failing`, async () => {
+    const repo = createRepo();
+    const hold = holdFile();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const logPath = fakeLogPath(repo);
+    const env = reviewEnv(logPath, { [HOLD]: hold, [B.failEnv]: "1" });
+    const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], { cwd: repo, env });
+    const id = started.stdout.match(B.jobIdPattern)?.[1];
+    assert.ok(await waitFor(() => fs.existsSync(logPath) && calls(logPath).length === 1), "the reviewer never started");
+    assert.match(command(process.execPath, [...ENTRY, "reset", "--dir", repo]).stdout, /Reset active/);
+    release(hold);
+    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "2", "--dir", repo], { cwd: repo, env, timeout: 150_000 }).stdout;
+    assert.match(finished, /Status: failed/);
+    const [{ session }] = sessions(repo);
+    assert.ok(session.reset_at);
+    assert.equal(session.retired_at, undefined);
+    const next = runReview(repo);
+    assert.doesNotMatch(next.result.stdout, /Notice: Previous session/);
+  });
+
+  test(`[${B.name}] a job an older version saved before applying shows no result unless it completed`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    runReview(repo);
+    const [{ job: done }] = jobs(repo);
+    const legacyPath = path.join(repo, ...B.artifactSegments, "jobs", "review-unapplied-legacy.json");
+    fs.writeFileSync(legacyPath, `${JSON.stringify({ ...done, id: "review-unapplied-legacy", status: "failed", error: "Simulated failure." })}\n`, "utf8");
+    const result = command(process.execPath, [...ENTRY, "result", "review-unapplied-legacy", "--dir", repo]).stdout;
+    assert.doesNotMatch(result, /## Verdict|Summary:/);
+    const cited = command(process.execPath, [...ENTRY, "cite", "review-unapplied-legacy", "--dir", repo]).stdout;
+    assert.match(cited, /No findings recorded for this job\./);
+  });
+
+  test(`[${B.name}] a job whose PID now belongs to another process is settled as dead`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    runReview(repo);
+    const [{ job: done }] = jobs(repo);
+    const stalePath = path.join(repo, ...B.artifactSegments, "jobs", "review-recycled-pid.json");
+    fs.writeFileSync(stalePath, `${JSON.stringify({
+      version: 2,
+      id: "review-recycled-pid",
+      status: "running",
+      pid: process.pid,
+      pid_started: "Mon Jan  1 00:00:00 2001",
+      created_at: "2999-01-01T00:00:00.000Z",
+      updated_at: "2999-01-01T00:00:00.000Z",
+      repo_root: done.repo_root,
+      branch: done.branch,
+      task_directory: done.task_directory,
+      session_id: done.session_id,
+      scope: { kind: "working" }
+    })}\n`, "utf8");
+    const status = command(process.execPath, [...ENTRY, "status", "review-recycled-pid", "--dir", repo]).stdout;
+    assert.match(status, /^Status: failed$/m);
+    assert.ok(alive(process.pid));
+  });
+
+  test(`[${B.name}] a reviewer that exits before reading its prompt fails the round with its own message`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "large.txt"), `${"x".repeat(100)}\n`.repeat(3000), "utf8");
+    const result = command(process.execPath, [...ENTRY, "--dir", repo, "working"], {
+      cwd: repo,
+      env: reviewEnv(fakeLogPath(repo), { [`${PREFIX}_EXIT_EARLY`]: "1" }),
+      allowFailure: true,
+      timeout: 60_000
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /fake reviewer rejected its options/);
+    assert.match(result.stdout, /^Status: failed$/m);
+    assert.equal(jobs(repo)[0].job.status, "failed");
+  });
+
+  test(`[${B.name}] a result that misses a schema field is shown as written, with a warning and no findings`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const { result } = runReview(repo, ["working"], { [`${PREFIX}_OMIT_FIELD`]: "next_steps" });
+    assert.match(result.stdout, /^Status: completed$/m);
+    assert.match(result.stdout, new RegExp(`^Warning: ${B.label}'s result does not match the review schema \\(result\\.next_steps is missing\\)`, "m"));
+    assert.equal(jobs(repo)[0].job.findings, null);
+    assert.deepEqual(sessions(repo)[0].session.ledger.findings, {});
+  });
+
+  test(`[${B.name}] a foreground failure prints the job, its artifact, and checkout warnings before the error`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const { result } = runReview(repo, ["working"], { [B.failEnv]: "1", [B.writeFileEnv]: "stray.txt" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, new RegExp(`^${B.label} review job: review-`, "m"));
+    assert.match(result.stdout, /^Status: failed$/m);
+    assert.match(result.stdout, /^Artifact: .*\/failed\/review-[^/]+\.md$/m);
+    assert.match(result.stdout, /^Warning: The checkout changed during the review: status added: \?\? stray\.txt/m);
+    assert.match(result.stderr, /Cross Review error: /);
+  });
+
+  test(`[${B.name}] output split inside a multibyte character arrives whole`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const { result } = runReview(repo, ["working"], { [`${PREFIX}_SPLIT_UTF8`]: "1", [B.titleEnv]: "Handle the “café” input — now" });
+    assert.match(result.stdout, /F-[0-9a-f]{6} Handle the “café” input — now/);
+    assert.doesNotMatch(result.stdout, /\uFFFD/);
+  });
+
+  test(`[${B.name}] a missing reviewer CLI fails before anything is recorded, with how to install it`, () => {
+    const repo = createRepo();
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const result = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
+      cwd: repo,
+      env: reviewEnv(fakeLogPath(repo), { [B.binEnv]: path.join(repo, "no-such-reviewer") }),
+      allowFailure: true
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /is not installed, or .*no-such-reviewer is not on PATH/);
+    assert.equal(fs.existsSync(path.join(repo, ...B.artifactSegments, "jobs")), false);
+  });
+
   test(`[${B.name}] cancellation records a consistent cancelled artifact`, async () => {
     const repo = createRepo();
+    const hold = holdFile();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = path.join(repo, `fake-${B.name}.jsonl`);
     const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
-      env: reviewEnv(logPath, { [B.delayEnv]: "5000" })
+      env: reviewEnv(logPath, { [HOLD]: hold })
     });
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
-    for (let attempt = 0; attempt < 250; attempt += 1) {
-      if (fs.existsSync(logPath) && calls(logPath).length === 1) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    assert.ok(await waitFor(() => fs.existsSync(logPath) && calls(logPath).length === 1), "the reviewer never started");
     assert.equal(calls(logPath).length, 1);
     command(process.execPath, [...ENTRY, "cancel", id, "--dir", repo]);
 
     let job;
     const jobFile = path.join(repo, ...B.artifactSegments, "jobs", `${id}.json`);
-    for (let attempt = 0; attempt < 200; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => {
       job = JSON.parse(fs.readFileSync(jobFile, "utf8"));
-      if (job.status === "cancelled" && job.artifact) break;
-    }
+      return job.status === "cancelled" && job.artifact;
+    });
     assert.equal(job.status, "cancelled");
     assert.match(job.error, /^Cancelled by user\./);
     assert.match(job.error, /session was retired/);
@@ -2281,7 +2908,7 @@ function defineSuite(B) {
     assert.equal(jobs(repo)[0].job.timeout_minutes, null);
     const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
       cwd: repo,
-      timeout: 30_000
+      timeout: 120_000
     }).stdout;
     assert.match(finished, /Status: completed/);
     assert.match(finished, /Example defect/);
@@ -2302,7 +2929,7 @@ function defineSuite(B) {
     assert.equal(jobs(repo)[0].job.timeout_minutes, 0.1);
     const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
       cwd: repo,
-      timeout: 30_000
+      timeout: 120_000
     }).stdout;
     assert.match(finished, /Status: failed/);
     assert.match(finished, new RegExp(`Error: ${B.label} review timed out after 0\\.1 minute\\(s\\)\\. .*session was retired`));
@@ -2326,20 +2953,16 @@ function defineSuite(B) {
     });
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
-    for (let attempt = 0; attempt < 500; attempt += 1) {
-      if (fs.existsSync(logPath) && calls(logPath).length === 1) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    assert.ok(await waitFor(() => fs.existsSync(logPath) && calls(logPath).length === 1), "the reviewer never started");
     const { pid } = calls(logPath)[0];
     command(process.execPath, [...ENTRY, "cancel", id, "--dir", repo]);
 
     let job;
     const jobFile = path.join(repo, ...B.artifactSegments, "jobs", `${id}.json`);
-    for (let attempt = 0; attempt < 400; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => {
       job = JSON.parse(fs.readFileSync(jobFile, "utf8"));
-      if (job.status === "cancelled" && job.artifact) break;
-    }
+      return job.status === "cancelled" && job.artifact;
+    });
     assert.equal(job.status, "cancelled");
     assert.match(job.error, /^Cancelled by user\./);
     assert.ok(job.artifact);
@@ -2413,7 +3036,7 @@ function defineSuite(B) {
     assert.ok(id);
     const waited = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
       cwd: repo,
-      timeout: 30_000
+      timeout: 120_000
     });
     assert.match(waited.stdout, /Status: completed/);
     assert.match(waited.stdout, /Example defect/);
@@ -2441,25 +3064,26 @@ function defineSuite(B) {
 
   test(`[${B.name}] the conversation ID is visible while a review is still running`, async () => {
     const repo = createRepo();
+    const hold = holdFile();
     fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
     const logPath = fakeLogPath(repo);
     const started = command(process.execPath, [...ENTRY, "--dir", repo, "working", "--background"], {
       cwd: repo,
-      env: reviewEnv(logPath, { [B.delayEnv]: "2500" })
+      env: reviewEnv(logPath, { [HOLD]: hold })
     });
     const id = started.stdout.match(B.jobIdPattern)?.[1];
     assert.ok(id);
     let status = "";
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => {
       status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout;
-      if (/Status: running/.test(status) && new RegExp(`${B.conversationLabel}: [0-9a-f-]{36}`).test(status)) break;
-    }
+      return /Status: running/.test(status) && new RegExp(`${B.conversationLabel}: [0-9a-f-]{36}`).test(status);
+    });
     assert.match(status, /Status: running/);
     assert.match(status, new RegExp(`${B.conversationLabel}: [0-9a-f-]{36}`));
+    release(hold);
     const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], {
       cwd: repo,
-      timeout: 30_000
+      timeout: 120_000
     }).stdout;
     assert.match(finished, /Status: completed/);
     const threadId = calls(logPath)[0].conversationId;
@@ -2471,7 +3095,7 @@ function defineSuite(B) {
     }).stdout;
     assert.match(again, new RegExp(`${B.conversationLabel}: ${threadId}`));
     const againId = again.match(B.jobIdPattern)?.[1];
-    command(process.execPath, [...ENTRY, "result", againId, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 });
+    command(process.execPath, [...ENTRY, "result", againId, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 120_000 });
   });
 
   test(`[${B.name}] state written by an older plugin version is ignored with a notice`, () => {
@@ -2624,6 +3248,45 @@ function defineSuite(B) {
     assert.equal(sessions(repo)[0].session.review_count, 2);
   });
 
+  test(`[${B.name}] a hooks path that is not a directory, such as /dev/null, does not stop a review`, () => {
+    const repo = createRepo();
+    git(repo, "config", "core.hooksPath", "/dev/null");
+    fs.writeFileSync(path.join(repo, "example.txt"), "changed\n", "utf8");
+    const { result } = runReview(repo, ["working"]);
+    assert.match(result.stdout, /^Status: completed$/m);
+    assert.doesNotMatch(result.stdout, /ENOTDIR|^Warning:.*hooks/m);
+  });
+
+  test(`[${B.name}] a change to the index alone, or to a linked worktree's shared config, is reported`, () => {
+    const repo = createRepo();
+    const file = path.join(repo, "example.txt");
+    fs.writeFileSync(file, "staged\n", "utf8");
+    git(repo, "add", "example.txt");
+    fs.writeFileSync(file, "unstaged\n", "utf8");
+    const { result } = runReview(repo, ["working"], { [`${PREFIX}_STAGE_ONLY`]: "example.txt" });
+    assert.match(result.stdout, /^Warning: The checkout changed during the review: staged content changed: example\.txt\.$/m);
+
+    const linked = path.join(scratchDir(`${B.name}-review-linked-`), "worktree");
+    git(repo, "worktree", "add", "-q", "-b", "linked", linked);
+    fs.writeFileSync(path.join(linked, "example.txt"), "in the linked worktree\n", "utf8");
+    const second = runReview(linked, ["working"], { [`${PREFIX}_CONFIG`]: "1" });
+    assert.match(second.result.stdout, /^Warning: The checkout changed during the review: \.git changed: config\.$/m);
+  });
+
+  test(`[${B.name}] a staged change that turns a directory into a file is reviewed`, () => {
+    const repo = createRepo();
+    fs.mkdirSync(path.join(repo, "nested", "deeper"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "nested", "deeper", "file.txt"), "inside\n", "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-m", "nested file");
+    git(repo, "rm", "-rq", "nested");
+    fs.writeFileSync(path.join(repo, "nested"), "now a file\n", "utf8");
+    git(repo, "add", "nested");
+    const { result } = runReview(repo, ["working"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^Status: completed$/m);
+  });
+
   test(`[${B.name}] rewriting a dirty file with identical content is not a change`, () => {
     const repo = createRepo();
     fs.writeFileSync(path.join(repo, "note.txt"), "stray\n", "utf8");
@@ -2659,7 +3322,7 @@ function defineSuite(B) {
     }).stdout;
     assert.doesNotMatch(started, /Resume interactively/);
     const id = started.match(B.jobIdPattern)?.[1];
-    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 30_000 }).stdout;
+    const finished = command(process.execPath, [...ENTRY, "result", id, "--wait", "--wait-minutes", "1", "--dir", repo], { cwd: repo, timeout: 120_000 }).stdout;
     assert.match(finished, /Status: completed/);
     assert.match(finished, /Resume interactively: /);
   });
@@ -2767,4 +3430,4 @@ function defineSuite(B) {
   });
 }
 
-export { BACKENDS, ENTRY_SCRIPT, command, git, calls, defineSuite };
+export { BACKENDS, ENTRY_SCRIPT, command, git, calls, defineSuite, scratchDir };

@@ -5,12 +5,15 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 
+import { exitEarly, hold, omitField, stageOnly, startHelper, strayConfig, writeOutput } from "./fake-common.mjs";
+
 const args = process.argv.slice(2);
 if (args.includes("--version")) {
   process.stdout.write("2.1.210 (Claude Code)\n");
   process.exit(0);
 }
 if (process.env.FAKE_CLAUDE_IGNORE_SIGTERM === "1") process.on("SIGTERM", () => {});
+exitEarly("FAKE_CLAUDE");
 
 let input = "";
 for await (const chunk of process.stdin) input += chunk.toString();
@@ -39,6 +42,8 @@ if (logPath) {
   })}\n`, "utf8");
 }
 
+startHelper("FAKE_CLAUDE");
+await hold("FAKE_CLAUDE");
 const delay = Number(process.env.FAKE_CLAUDE_DELAY_MS || 0);
 if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
 
@@ -47,6 +52,8 @@ if (process.env.FAKE_CLAUDE_WRITE_FILE) {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, "stray\n", "utf8");
 }
+stageOnly("FAKE_CLAUDE", process.cwd());
+strayConfig("FAKE_CLAUDE", process.cwd());
 if (process.env.FAKE_CLAUDE_TAG === "1") spawnSync("git", ["tag", "stray-tag"], { cwd: process.cwd() });
 if (process.env.FAKE_CLAUDE_HOOK === "1") {
   const gitDir = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: process.cwd(), encoding: "utf8" }).stdout.trim();
@@ -97,8 +104,16 @@ if (process.env.FAKE_CLAUDE_CHECKLIST_ITEMS) {
   for (const finding of structured.findings) finding.checklist_items = process.env.FAKE_CLAUDE_CHECKLIST_ITEMS.split(",");
 }
 if (process.env.FAKE_CLAUDE_VERDICTS) structured.verdicts = JSON.parse(process.env.FAKE_CLAUDE_VERDICTS);
+// The real CLI enforces the schema it is given, so a checklist schema always
+// gets its required fields, empty unless a test supplies them.
+const suppliedSchema = (schemaJson ? JSON.parse(schemaJson) : null);
+if (suppliedSchema?.properties?.findings?.items?.required?.includes("checklist_items")) {
+  for (const finding of structured.findings) finding.checklist_items ??= [];
+}
+if (suppliedSchema?.required?.includes("verdicts")) structured.verdicts ??= [];
+omitField("FAKE_CLAUDE", structured);
 
-process.stdout.write(`${JSON.stringify({
+await writeOutput("FAKE_CLAUDE", `${JSON.stringify({
   type: "result",
   subtype: "success",
   is_error: false,

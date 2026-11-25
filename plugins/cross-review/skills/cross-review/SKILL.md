@@ -1,7 +1,7 @@
 ---
 name: cross-review
 description: Ask a different coding agent, Codex, Claude, or Antigravity, to review an exact Git scope, keeping one persistent reviewer conversation per branch that remembers earlier findings and the user's decisions. Use when the user asks Codex or Claude to review code, wants a second opinion from another agent or model, wants a re-review that does not repeat rejected findings, or manages a running cross-review. Replaces the codex-review and claude-review skills. Do not use when the user asks you yourself to review.
-argument-hint: "[codex|claude|agy] [working|branch <base>|commit <ref>|range <a>..<b>|repo|again|new|reset|status|result|cite|cancel] [--background] [--focus-file <path>] [--rubric-file <path>] [--checklist-file <path>] [-- focus]"
+argument-hint: "[codex|claude|agy] [working|branch <base>|commit <ref>|range <a>..<b>|repo|again|new|reset|status|result|cite|cancel|prune] [--background] [--focus-file <path>] [--rubric-file <path>] [--checklist-file <path>] [-- focus]"
 allowed-tools: Bash(node *)
 ---
 
@@ -21,7 +21,7 @@ node "$SKILL_DIR/scripts/cross-review.mjs" <reviewer> <arguments>
 
 Use `agy` only when the user names it. It stays off until the user opts in, so if the runtime says that, relay its message and stop; never set the opt-in yourself.
 
-Translate the user's natural request, or any slash-command arguments, into the runtime interface. Preserve custom focus and follow-up feedback exactly. When the user points to a file of focus text, such as a repository's review checklist, pass it with `--focus-file <path>` instead of pasting it; a relative path resolves against the current directory. Read [references/interface.md](references/interface.md) when scope or command mapping is unclear, and before using `--resume-session`, `--rubric-file`, or `--checklist-file`.
+Translate the user's natural request, or any slash-command arguments, into the runtime interface. Preserve custom focus and follow-up feedback exactly. When the user points to a file of focus text, such as a repository's review checklist, pass it with `--focus-file <path>` instead of pasting it; a relative path resolves against the current directory. Read [references/interface.md](references/interface.md) when scope or command mapping is unclear, and before using `--resume-session`, `--rubric-file`, or `--checklist-file`. A `--background` review prints its job ID; pass that ID, and the same `--dir`, to every later `status`, `result`, `cite`, and `cancel` for it, since another review may start meanwhile.
 
 ```bash
 node "$SKILL_DIR/scripts/cross-review.mjs" codex --background
@@ -30,13 +30,13 @@ node "$SKILL_DIR/scripts/cross-review.mjs" codex range main..HEAD --background -
 node "$SKILL_DIR/scripts/cross-review.mjs" codex again --background -- "reject F-1a2b3c: it is public API"
 node "$SKILL_DIR/scripts/cross-review.mjs" claude --dir /path/to/repo working --background
 node "$SKILL_DIR/scripts/cross-review.mjs" agy branch main --background
-node "$SKILL_DIR/scripts/cross-review.mjs" codex result --wait
-node "$SKILL_DIR/scripts/cross-review.mjs" codex status
+node "$SKILL_DIR/scripts/cross-review.mjs" codex result JOB_ID --wait
+node "$SKILL_DIR/scripts/cross-review.mjs" codex status JOB_ID
 ```
 
 ## After results arrive: double-check before relaying
 
-1. Run `node "$SKILL_DIR/scripts/cross-review.mjs" <reviewer> cite JOB_ID` (the job ID defaults to the latest). It
+1. Run `node "$SKILL_DIR/scripts/cross-review.mjs" <reviewer> cite JOB_ID` with the review's job ID. It
    prints every finding with the lines it cites, read from the reviewed revision for committed scopes and from the
    working tree for working scope, and marks what it cannot resolve.
 2. Classify each finding from those lines. When they are not enough, open the file at the revision `cite`
@@ -48,7 +48,7 @@ node "$SKILL_DIR/scripts/cross-review.mjs" codex status
    - unverifiable: `cite` could not resolve the location, or the working tree changed since the review.
 3. Relay the findings with your classification and one line of reasoning each, keeping the reviewer's ids so the
    user can decide with `reject F-...`, `accept F-...`, `defer F-...`, or `reopen F-...`; then relay the reviewer's
-   next steps, residual risk, and any `Warning:` line verbatim.
+   next steps, residual risk, and any `Omitted for safety:` or `Warning:` line verbatim.
 4. You may have written the code under review. Default to treating a finding as valid unless the cited lines show
    otherwise; do not argue from memory of intent.
 
@@ -73,11 +73,12 @@ node "$SKILL_DIR/scripts/cross-review.mjs" codex status
 - Run reviews with `--background`, because a max-effort review often outlasts a host's per-call time limit; the
   worker survives the end of the call and of the session. Use `--wait` on a review only when the user explicitly asks
   to block and the change is tiny.
-- To wait for a background review, call `result --wait` repeatedly until the status is terminal. Each call blocks for
+- To wait for a background review, call `result JOB_ID --wait` repeatedly until the status is terminal. Each call blocks for
   at most `--wait-minutes` (default 5), so give the shell call a timeout of at least six minutes, and keep the user
   updated between calls. A review has no deadline unless `--timeout-minutes` sets one; pass it only when the user
   asks for a time limit. Do not impose an agent-side timeout or treat quiet elapsed time alone as a stalled review.
-- Use `status`, `result`, and `cancel` to manage background jobs.
+- Use `status`, `result`, and `cancel` to manage background jobs, and `prune` only when the user asks to clear old
+  review state.
 
 ## Sessions and decisions
 

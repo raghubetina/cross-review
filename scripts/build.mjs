@@ -95,7 +95,8 @@ export function currentRelease() {
   return {
     versions: manifestVersions(),
     digests: Object.fromEntries(TARGETS.map((target) => [target.plugin, pluginDigest(target)])),
-    record: readRecord()
+    record: readRecord(),
+    pushed: pushedRecord()
   };
 }
 
@@ -111,11 +112,20 @@ function changedPlugins(recorded, digests) {
 // Returns what keeps the current state from being releasable, as messages
 // that say how to fix it; an empty list means every plugin's shipped files
 // match the digests recorded for the one version all manifests carry.
-export function releaseProblems({ versions, digests, record }) {
+export function releaseProblems({ versions, digests, record, pushed = null }) {
   const version = sharedVersion(versions);
   if (!version) {
     return [
       `The manifests disagree on the version (${versions.map((entry) => `${entry.where}: ${entry.version}`).join(", ")}). Set them all to the same version.`
+    ];
+  }
+  // Another branch may have released this version with other files since
+  // this one recorded it, and installed copies would never get these.
+  const published = pushed?.[version];
+  if (published && changedPlugins(published, digests).length) {
+    return [
+      `origin/main lists other digests for version ${version}, so installed copies of ${version} would never receive these files. ` +
+        `Bump the version in ${versions.map((entry) => entry.where).join(", ")}, then run \`npm run build\`.`
     ];
   }
   const recorded = record[version];
@@ -135,17 +145,18 @@ export function releaseProblems({ versions, digests, record }) {
 export function nextRecord({ versions, digests, record }, pushed) {
   const version = sharedVersion(versions);
   if (!version) return { warning: "Digests were not recorded because the manifests disagree on the version." };
-  const recorded = record[version];
-  if (recorded && !changedPlugins(recorded, digests).length) return {};
   // A branch's record can lack a version that another release has since
-  // pushed, so the published digests decide before the local record does.
+  // pushed, or match files that differ from it, so the published digests
+  // decide before the local record does.
   const published = pushed?.[version];
+  const recorded = record[version];
   if (published && changedPlugins(published, digests).length) {
     return {
       warning: `${RECORD} does not record these files under ${version}, because origin/main lists other digests for ${version} and installed copies may have it. ` +
         `Bump the version in every manifest and run \`npm run build\` again.`
     };
   }
+  if (recorded && !changedPlugins(recorded, digests).length) return {};
   if (!recorded) {
     return { record: { ...record, [version]: digests }, recorded: `Recorded the digests of ${version} in ${RECORD}.` };
   }

@@ -28,7 +28,6 @@ export default {
     }
   },
   usesLastMessageFile: false,
-  canRunGit: (capability) => capability !== "read-only",
   prompt: {
     full: FULL_PROMPT,
     workspace: FULL_PROMPT,

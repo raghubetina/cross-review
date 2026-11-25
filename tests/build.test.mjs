@@ -68,6 +68,11 @@ test("a change without a version bump is reported with the fix", () => {
   assert.match(changed, /Bump the version in a\/plugin\.json, b\/marketplace\.json, then run `npm run build`/);
   assert.match(changed, /If 1\.2\.3 is not on origin\/main yet, `npm run build` records the new digests under 1\.2\.3 instead\./);
 
+  // A local match does not hide a different release of the same version on origin/main.
+  const elsewhere = { "1.2.3": { "codex-review": "zz", "claude-review": "bb" } };
+  assert.match(releaseProblems({ versions, digests: { "codex-review": "aa", "claude-review": "bb" }, record, pushed: elsewhere })[0], /origin\/main lists other digests for version 1\.2\.3/);
+  assert.deepEqual(releaseProblems({ versions, digests: { "codex-review": "aa", "claude-review": "bb" }, record, pushed: record }), []);
+
   const bumped = versions.map((entry) => ({ ...entry, version: "1.2.4" }));
   assert.match(releaseProblems({ versions: bumped, digests: { "codex-review": "cc", "claude-review": "bb" }, record })[0], /Version 1\.2\.4 has no digests/);
   assert.match(
@@ -104,6 +109,10 @@ test("the build records a new version but never other digests for a version orig
   const caughtUp = nextRecord({ versions, digests, record }, { ...earlier, "1.2.4": digests });
   assert.deepEqual(caughtUp.record, { ...earlier, "1.2.4": digests });
   assert.match(caughtUp.recorded, /Recorded the digests that origin\/main lists for 1\.2\.4/);
+
+  const matchingLocally = nextRecord({ versions, digests, record: { ...earlier, "1.2.4": digests } }, released);
+  assert.equal(matchingLocally.record, undefined);
+  assert.match(matchingLocally.warning, /origin\/main lists other digests for 1\.2\.4/);
 
   const unknown = nextRecord({ versions, digests, record }, null);
   assert.equal(unknown.record, undefined);

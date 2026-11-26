@@ -2,10 +2,11 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "cross-review",
   "displayName": "Cross Review",
-  "version": "0.11.0",
-  "description": "Ask another coding agent, Codex, Claude, or Antigravity, to review an exact Git scope, keeping one persistent reviewer conversation per branch.",
+  "version": "0.12.0",
+  "description": "Ask other coding agents, Codex, Claude, or Antigravity, to review an exact Git scope in a persistent conversation per branch, or to research a question side by side with every quote checked against its source.",
   "suggestedPrompts": [
     "Ask Codex to review my current working changes.",
-    "Ask Claude to review this branch against main."
+    "Ask Claude to review this branch against main.",
+    "Ask Codex and Claude to research this question and check their sources."
   ]
 }

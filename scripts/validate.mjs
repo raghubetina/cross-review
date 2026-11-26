@@ -34,7 +34,9 @@ try {
   run("codex", ["plugin", "marketplace", "add", ROOT], env);
   run("codex", ["plugin", "add", "cross-review@cross-review"], env);
   const listed = run("codex", ["debug", "prompt-input"], env, { quiet: true });
-  if (!listed.includes("cross-review:cross-review")) throw new Error("Codex installed the plugin but does not list its skill.");
+  for (const skill of ["cross-review:cross-review", "cross-review:cross-research"]) {
+    if (!listed.includes(skill)) throw new Error(`Codex installed the plugin but does not list ${skill}.`);
+  }
 } finally {
   fs.rmSync(codexHome, { recursive: true, force: true });
 }

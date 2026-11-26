@@ -1,1 +1,3 @@
 tmp/
+# Where scripts/vendor-parse5.mjs stages a new copy, kept out of the plugin's digest.
+plugins/cross-review/skills/cross-research/scripts/.vendor-*/

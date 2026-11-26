@@ -1,0 +1,6 @@
+interface:
+  display_name: "Cross Research"
+  short_description: "One question, several agents, every quote checked"
+  default_prompt: "Use $cross-research to ask Claude to research this question and check its sources."
+policy:
+  allow_implicit_invocation: true

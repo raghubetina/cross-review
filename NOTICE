@@ -7,3 +7,10 @@ codex-rs/prompts/templates/review/rubric.md in
 https://github.com/openai/codex, Copyright OpenAI, licensed under the Apache
 License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). The text
 was reworded and extended; it is not the original.
+
+The cross-research skill's scripts/vendor/ directory holds files copied from
+parse5 (https://github.com/inikulin/parse5), Copyright (c) 2013-2019 Ivan
+Nikulin, licensed under the MIT License, and from entities
+(https://github.com/fb55/entities), Copyright (c) Felix Böhm, licensed under
+the BSD 2-Clause License. They are unchanged except that parse5's import of
+entities names the copy. Each package's license is in its directory there.

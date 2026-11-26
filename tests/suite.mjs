@@ -205,8 +205,11 @@ function git(repo, ...args) {
   return command("git", ["-C", repo, ...args]).stdout.trim();
 }
 
+// Only the lines a fake has finished: a test polls the log while a fake may be
+// partway through appending to it.
 function calls(logPath) {
-  return fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+  const text = fs.readFileSync(logPath, "utf8");
+  return text.slice(0, text.lastIndexOf("\n") + 1).split("\n").filter(Boolean).map(JSON.parse);
 }
 
 function defineSuite(B) {
@@ -1494,13 +1497,14 @@ function defineSuite(B) {
     fs.writeFileSync(lockPath, `${process.pid}\n`, "utf8");
     release(hold);
 
-    let status;
+    // Watched in the job's own record, since status waits for the state lock
+    // this test holds whenever it finds the review still running.
     try {
-      await waitFor(() => (status = command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout).includes("Status: completed"));
+      assert.ok(await waitFor(() => jobs(repo).find(({ job }) => job.id === id)?.job.status === "completed"), "the review never completed while the state was locked");
     } finally {
       fs.rmSync(lockPath, { force: true });
     }
-    assert.match(status, /Status: completed/);
+    assert.match(command(process.execPath, [...ENTRY, "status", id, "--dir", repo]).stdout, /Status: completed/);
     assert.equal(sessions(repo)[0].session.review_count, 1);
   });
 

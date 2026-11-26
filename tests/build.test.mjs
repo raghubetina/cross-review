@@ -19,8 +19,12 @@ test("the plugin ships the files recorded for its manifest version", () => {
 test("a plugin digest covers every shipped file but not the manifest versions", () => {
   for (const target of TARGETS) {
     const files = pluginFiles(target);
-    for (const file of [...target.manifests, `${target.skill}/scripts/runtime.mjs`, `${target.skill}/SKILL.md`]) {
+    const shipped = target.skills.flatMap((skill) => [`${skill}/SKILL.md`, `${skill}/references/interface.md`, `${skill}/agents/openai.yaml`]);
+    for (const file of [...target.manifests, ...shipped]) {
       assert.ok(files.includes(file), `${file} is not among the digested files of ${target.plugin}`);
+    }
+    for (const skill of target.skills) {
+      assert.ok(files.some((file) => file.startsWith(`${skill}/scripts/`) && file.endsWith(".mjs")), `${skill} ships no runtime`);
     }
   }
 
@@ -48,13 +52,15 @@ test("every host's manifest describes the same plugin", () => {
   }
 });
 
-test("the skill fits what every host will load", () => {
-  for (const target of TARGETS) {
-    const skill = fs.readFileSync(path.join(ROOT, target.skill, "SKILL.md"));
-    assert.ok(skill.length <= CODEX_SKILL_PROMPT_BYTES, `SKILL.md is ${skill.length} bytes; Codex truncates it at ${CODEX_SKILL_PROMPT_BYTES}.`);
-    const [, description] = skill.toString("utf8").match(/^description: (.+)$/m);
-    assert.ok(description.length <= SKILL_DESCRIPTION_CHARACTERS, `The description is ${description.length} characters.`);
-    assert.ok(!description.includes(": "), "A colon and space ends a plain YAML value.");
+test("every skill fits what every host will load", () => {
+  for (const directory of TARGETS.flatMap((target) => target.skills)) {
+    const skill = fs.readFileSync(path.join(ROOT, directory, "SKILL.md"));
+    assert.ok(skill.length <= CODEX_SKILL_PROMPT_BYTES, `${directory}/SKILL.md is ${skill.length} bytes; Codex truncates it at ${CODEX_SKILL_PROMPT_BYTES}.`);
+    const text = skill.toString("utf8");
+    assert.equal(text.match(/^name: (.+)$/m)[1], path.basename(directory));
+    const [, description] = text.match(/^description: (.+)$/m);
+    assert.ok(description.length <= SKILL_DESCRIPTION_CHARACTERS, `The description of ${directory} is ${description.length} characters.`);
+    assert.ok(!description.includes(": "), `A colon and space ends a plain YAML value, in ${directory}.`);
   }
 });
 

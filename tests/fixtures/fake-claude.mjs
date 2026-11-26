@@ -5,7 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 
-import { exitEarly, hold, omitField, stageOnly, startHelper, strayConfig, writeOutput } from "./fake-common.mjs";
+import { exitEarly, hold, omitField, researchResult, stageOnly, startHelper, strayConfig, writeOutput } from "./fake-common.mjs";
 
 const args = process.argv.slice(2);
 if (args.includes("--version")) {
@@ -70,7 +70,7 @@ if (process.env.FAKE_CLAUDE_FAIL === "1") {
   process.exit(2);
 }
 
-const structured = {
+const structured = researchResult("FAKE_CLAUDE", (schemaJson ? JSON.parse(schemaJson) : null)) ?? {
   verdict: "needs-attention",
   summary: "One material issue found.",
   findings: [

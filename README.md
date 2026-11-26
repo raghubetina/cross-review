@@ -10,6 +10,8 @@ A plugin that lets one coding agent ask a different one for a code review of an 
 
 Every reviewer shares the same session model: explicit scopes (`working`, `branch [base]`, `commit [ref]`, `range <from>..<to>`, `repo`), `again` to re-review in the same conversation, `--resume-session` for exact resumes across branch identity changes, detached background jobs with `status`, `result`, and `cancel`, secret-filtered Git context on stdin, and a JSON-schema-enforced result. How this came to be one plugin is in [docs/unification-plan.md](docs/unification-plan.md).
 
+A second skill in the same plugin, [Cross Research](#cross-research), puts one question to several agents at once and checks every quote they cite against its source.
+
 ## Install
 
 Requirements: Node.js 18.18 or newer, Git, your host, and the CLI of each reviewer you will use, installed and logged in: Codex CLI 0.136 or newer, Claude Code 2.1.205 or newer, Antigravity CLI 1.5.1 or newer. Tested with Codex CLI 0.166.0, Claude Code 2.1.318, and Antigravity CLI 1.5.1.
@@ -164,21 +166,61 @@ The reviewer is the same agent you already trust to write code, so by default it
 
 Each session has a scratch directory at `<artifact directory>/<task>/scratch/`, already ignored by Git, which the prompt names as the only place inside the repository the reviewer may create files; it persists across review rounds so a test harness from round one is reusable. The prompt also tells the reviewer to leave the checkout as found: no edits to tracked files, no new files outside scratch, no git commands that change refs, the index, the stash, or the working tree, and never a commit or push. After the review the runtime compares HEAD, refs, the dirty set by content, the staged blobs, newly ignored paths, and the Git config and hooks with what it saw before, reading config and hooks where Git does, so a linked worktree's shared ones count, and reports any difference as a warning naming the paths, on the job, in the artifact, and in the rendered result, on success and failure alike. Ignored paths that already existed are not compared. If HEAD moved, the session keeps the pre-review HEAD as its last reviewed commit, so a stray commit can be undone without losing continuity. An explicit `--resume-session` review fails instead when the checkout's branch identity, HEAD, or cleanliness changed, or another active session took the destination; any other change, such as a new tag, is a warning as in an ordinary review. In `full` and `workspace` the Claude backend behaves like a normal session in the reviewed repository, its `.claude/settings.json` hooks included; `read-only` loads only your user settings so a repository you do not trust cannot run hooks, and the reviewer runs with your own privileges and network in every mode.
 
+## Cross Research
+
+The plugin carries a second skill, `cross-research`, for questions that no diff answers. It puts one question to several agents at once, each with its own search tools and its own persistent conversation, keeps their reports side by side, and tests every quote they cite against its source. Its second mode, brainstorm, collects ideas that differ in kind before anything is chosen.
+
+| Host | Researchers by default | Invoke |
+| --- | --- | --- |
+| Claude Code | Codex | ask naturally, or `/cross-research research -- <question>` |
+| Codex | Claude Code | ask naturally, or `$cross-research research -- <question>` |
+| Antigravity CLI (`agy`) | Codex, Claude Code | ask naturally |
+
+Name the researchers with `--with codex,claude,agy`. A name may repeat for more seats of one kind, and `agy` takes part only when named, after the same opt-in as for reviews.
+
+```text
+research -- <question>          every seat researches the question
+brainstorm -- <problem>         every seat lists ideas
+again [id] -- <follow-up>       the next round, in each seat's own conversation
+result [id] --wait              every seat's report, side by side
+check [id]                      test each cited quote against its source
+status, cancel, list, prune     manage rounds and threads
+```
+
+A research round goes like this:
+
+- **Independent seats.** Every seat gets the same question in a conversation of its own and is never shown another's work unless a later round shares it. Each is told where the others' work is and to leave it alone, since a researcher that can read the repository could read that too. The host agent is told to do its own research before it reads any report, since it is the one researcher the others cannot have influenced.
+- **Claims with sources.** A researcher returns a summary, claims, gaps, and the artifacts it left behind. Each claim is one checkable statement with a basis (`source`, `experiment`, or `inference`), a confidence, and sources: a web address or a file, plus one passage quoted exactly from it. Every claim gets an id such as `C-1a2b3c`.
+- **A mechanical check.** `check` reads each source once and reports each quote as `found`, `partial`, `missing`, `unreachable`, or `unreadable`. It reads web pages, GitHub files, files in the repository, and PDFs when `pdftotext` is installed, and names the file that holds the text of each page it fetched. `found` means the passage is there as whole words, raised digits included, so `106` is not `10⁶`. It does not mean the passage supports the claim, so the host is told to read the claims that matter, to weigh sources and not seats, and to say which claims are verified, overstated, unverified, inferred, or contradicted.
+- **What each seat added.** `result` ends with the web pages each seat cited, how many of them no other seat cited, and the pages more than one seat cited, which are one source and not two.
+- **Follow-ups.** `again` continues every seat's conversation. `again --share` shows each seat the others' claims and has it confirm or contradict them with sources of its own.
+
+A brainstorm round asks each seat for ideas that differ in mechanism, each with the assumption it rests on and the cheapest test of that assumption, and forbids ranking and recommending. So that seats diverge, each also gets a lens that at least half its ideas must come from: `precedent`, `subtraction`, `inversion`, `first-principles`, `failure`, or `extremes`. `--lens` supplies your own and `--no-lens` runs without. Every idea gets an id such as `I-1a2b3c`. You decide with `pursue I-...`, `drop I-...: reason`, and `park I-...` after `again --`, which asks for more ideas unlike any in the pool, or after `again --mode research --`, which has every seat test the pursued ideas against evidence.
+
+Researchers run with `--capability full` by default, as reviewers do: your privileges, the network, and your own MCP servers, so they can clone a library to read its source or download a paper. They are told to keep all of that under the thread's scratch directory and to leave the checkout alone. Research reads arbitrary web pages, and a page can carry instructions aimed at an agent. `--capability workspace` confines a Codex researcher to the checkout and temporary directories, where it can still clone and download, and `--capability read-only` narrows a researcher to searching and reading. `agy` is always read-only: it searches and reads pages, and cannot clone or download.
+
+Research has been run against Codex CLI 0.172.0 and Claude Code 2.1.332, in `full` and in `read-only`. As a researcher, `agy` has so far run only against the test suite's fake CLI.
+
+The runtime keeps its records under the Git directory, in `cross-research/`: the threads, each round's prompts, raw event streams, and results, a `round-<n>.md` report, and the text of every page `check` fetched. Those records decide what later commands run with your privileges, such as a seat's capability and the processes to stop, so they are kept where a researcher confined to the workspace cannot write, and a record that does not hold what the runtime wrote is ignored. The only state in the checkout is each seat's scratch directory, `tmp/cross_research/<thread>/<seat>/`, ignored through `.git/info/exclude` unless something already ignores it. The skill's [interface reference](plugins/cross-review/skills/cross-research/references/interface.md) describes every option.
+
 ## Develop
 
 ```sh
 npm test
 npm run validate
 npm run smoke
+npm run smoke:research
 ```
 
-`npm test` runs one suite, parametrized over all three reviewers, against disposable Git repositories with fake `claude`, `codex`, and `agy` executables. CI runs it on Linux and macOS with Node.js 18.18, 22, and 24.
+`npm test` runs one suite, parametrized over all three reviewers, against disposable Git repositories with fake `claude`, `codex`, and `agy` executables, and `tests/research.test.mjs` for cross-research against the same fakes. CI runs it on Linux and macOS with Node.js 18.18, 22, and 24.
 
 `npm run validate` checks the plugin against each host: `claude plugin validate --strict`, `agy plugin validate --strict`, and an install into a throwaway `CODEX_HOME`, since Codex has no validator. It needs all three CLIs, and it can start failing with no change here, because Antigravity's validator gains warnings between releases.
 
 `npm run smoke` is opt-in and spends reviewer usage: it runs a review, a resumed re-review, `cite`, and an audit round with a rubric and a two-item checklist against the real `claude` and `codex` CLIs on a disposable repository at low effort. The audit round is the only check that each CLI accepts the schema a checklist extends. `npm run smoke -- codex` or `npm run smoke -- claude` runs one half. Its Codex half leaves a trust entry for the disposable repository in `~/.codex/config.toml`, which is safe to delete.
 
-The runtime lives in `plugins/cross-review/skills/cross-review/scripts/runtime.mjs` with one backend module per reviewer in `scripts/backends/`, listed in the `cross-review.mjs` entry. All of it stays inside the plugin directory because hosts copy an installed plugin out of the repository. Any change under `plugins/` needs a version bump before it ships; see [Update](#update). Keep `SKILL.md` under 8,000 bytes, which `npm test` enforces: Codex's source cuts an injected skill off there. Where `.git/info/exclude` lists `.claude-*`, as this repository's author's Git template does, `git add` silently skips a new `.claude-plugin/` file, so add one with `git add -f`.
+`npm run smoke:research` is the same for cross-research, and also reads the web: a research round, `check`, a shared follow-up, and a brainstorm, with `codex` and `claude` as seats at low effort. It is the only check that each CLI accepts the research and brainstorm schemas and can search from where it runs. `npm run smoke:research -- codex` names the seats.
+
+The runtime lives in `plugins/cross-review/skills/cross-review/scripts/runtime.mjs` with one backend module per reviewer in `scripts/backends/`, listed in the `cross-review.mjs` entry. Cross-research has its own runtime in `plugins/cross-review/skills/cross-research/scripts/research.mjs`; it runs the same backends through `adapters.mjs`, and `support.mjs` holds its copies of the file, lock, and process helpers that `runtime.mjs` does not export, so a fix to one belongs in both. Its source check parses HTML with parse5, whose files are copied into `scripts/vendor/` beside it as published; `npm run vendor` copies them again from the release that `scripts/vendor-parse5.mjs` names. All of it stays inside the plugin directory because hosts copy an installed plugin out of the repository. Any change under `plugins/` needs a version bump before it ships; see [Update](#update). Keep each `SKILL.md` under 8,000 bytes, which `npm test` enforces: Codex's source cuts an injected skill off there. Where `.git/info/exclude` lists `.claude-*`, as this repository's author's Git template does, `git add` silently skips a new `.claude-plugin/` file, so add one with `git add -f`.
 
 Verify an installed development build without starting a review:
 
@@ -194,4 +236,4 @@ The first should report a path inside the plugin directory and the second a path
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The review rubric text adapted from OpenAI Codex is under the Apache License 2.0, see [NOTICE](NOTICE).
+MIT, see [LICENSE](LICENSE). The review rubric text adapted from OpenAI Codex is under the Apache License 2.0, and the copies of parse5 and entities are under the MIT and BSD 2-Clause licenses; see [NOTICE](NOTICE).

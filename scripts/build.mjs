@@ -20,7 +20,7 @@ export const TARGETS = [
   {
     plugin: "cross-review",
     directory: "plugins/cross-review",
-    skill: "plugins/cross-review/skills/cross-review",
+    skills: ["plugins/cross-review/skills/cross-review", "plugins/cross-review/skills/cross-research"],
     manifests: [
       "plugins/cross-review/.claude-plugin/plugin.json",
       "plugins/cross-review/.codex-plugin/plugin.json",

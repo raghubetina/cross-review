@@ -1,7 +1,7 @@
 {
   "name": "cross-review",
-  "version": "0.11.0",
-  "description": "Ask another coding agent, Codex, Claude, or Antigravity, to review an exact Git scope, keeping one persistent reviewer conversation per branch.",
+  "version": "0.12.0",
+  "description": "Ask other coding agents, Codex, Claude, or Antigravity, to review an exact Git scope in a persistent conversation per branch, or to research a question side by side with every quote checked against its source.",
   "author": {
     "name": "Raghu Betina",
     "url": "https://github.com/raghubetina"
@@ -10,8 +10,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Cross Review",
-    "shortDescription": "Persistent, scoped code reviews from another agent.",
-    "longDescription": "Ask another coding agent to review exact Git scopes, keep context across re-reviews, and preserve inspectable local artifacts.",
+    "shortDescription": "Code reviews and checked research from other agents.",
+    "longDescription": "Ask another coding agent to review exact Git scopes with context kept across re-reviews, or put one question to several agents at once and check every quote they cite against its source.",
     "developerName": "Raghu Betina",
     "category": "Productivity",
     "capabilities": [
@@ -21,7 +21,7 @@
     "defaultPrompt": [
       "Ask Claude to review my current working changes.",
       "Ask Claude to review this branch against main.",
-      "Show the latest cross-review result."
+      "Ask Claude to research this question and check its sources."
     ]
   },
   "license": "MIT"

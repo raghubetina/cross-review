@@ -19,10 +19,18 @@ export function exitEarly(prefix) {
 export function startHelper(prefix) {
   const pidFile = process.env[`${prefix}_HELPER_PID_FILE`];
   if (!pidFile) return;
+  // A helper in a session of its own is outside the reviewer's process group,
+  // as a command that a CLI's shell tool starts can be. One that holds the
+  // reviewer's output keeps the pipe open after the reviewer exits.
+  const holdsOutput = process.env[`${prefix}_HELPER_HOLDS_OUTPUT`] === "1";
+  const options = {
+    stdio: holdsOutput ? ["ignore", "inherit", "inherit"] : "ignore",
+    detached: holdsOutput || process.env[`${prefix}_HELPER_OWN_SESSION`] === "1"
+  };
   // A helper that ignores SIGTERM stops only when the whole group is killed.
   const helper = process.env[`${prefix}_HELPER_IGNORES_TERM`] === "1"
-    ? spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"], { stdio: "ignore" })
-    : spawn("sleep", ["120"], { stdio: "ignore" });
+    ? spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"], options)
+    : spawn("sleep", ["120"], options);
   helper.unref();
   fs.writeFileSync(pidFile, String(helper.pid), "utf8");
 }
@@ -72,4 +80,49 @@ export function stageOnly(prefix, cwd) {
 // Changes the repository's shared configuration, as a stray git config would.
 export function strayConfig(prefix, cwd) {
   if (process.env[`${prefix}_CONFIG`] === "1") spawnSync("git", ["config", "cross-review.stray", "1"], { cwd });
+}
+
+// What a fake returns for a research or brainstorm schema, since the real
+// CLIs answer in whichever schema they are given; null for a review schema.
+// A test can supply the claims or ideas as JSON.
+export function researchResult(prefix, schema) {
+  const properties = schema?.properties ?? {};
+  const setting = (name) => process.env[`${prefix}_${name}`];
+  if (properties.claims) {
+    return {
+      summary: "The fake researcher's answer.",
+      claims: setting("CLAIMS") ? JSON.parse(setting("CLAIMS")) : [
+        {
+          id: null,
+          statement: "The example file starts with the word first.",
+          basis: "source",
+          confidence: "high",
+          sources: [{ url: null, file: "example.txt", quote: "first" }],
+          note: "",
+          responds_to: null,
+          stance: "independent"
+        }
+      ],
+      gaps: ["Whatever the fake researcher did not look at."],
+      artifacts: []
+    };
+  }
+  if (properties.ideas) {
+    return {
+      framing: "The fake generator's reading of the problem.",
+      ideas: setting("IDEAS") ? JSON.parse(setting("IDEAS")) : ["Do the simple thing", "Do the opposite"].map((title, index) => ({
+        id: null,
+        title,
+        description: `${title}, described.`,
+        wins_when: "The simple case is the common one.",
+        assumption: "The example file stays small.",
+        test: "Measure it.",
+        precedents: [],
+        from_lens: index === 0,
+        builds_on: []
+      })),
+      questions: ["Which constraint matters most?"]
+    };
+  }
+  return null;
 }
